@@ -38,7 +38,11 @@ impl Data {
     }
 }
 /// Given function index function_index` and input `input`
-fn function_map(function_index: usize, input: &[u8], stream: &mut TcpStream) {
+fn function_map(
+    function_index: usize,
+    input: &[u8],
+    stream: &mut TcpStream,
+) -> std::io::Result<()> {
     trace!("input: {:?}", input);
     let store = unsafe { &**DATA.assume_init_ref() };
     match function_index {
@@ -46,35 +50,36 @@ fn function_map(function_index: usize, input: &[u8], stream: &mut TcpStream) {
             let input = bincode::deserialize(input).unwrap();
             let output = store.read().unwrap().get(input);
             trace!("output: {:?}", output);
-            write_frame(stream, output);
+            write_frame(stream, output)?;
         }
         1 => {
             let input = bincode::deserialize(input).unwrap();
             trace!("input: {:?}", input);
             let output = store.write().unwrap().set(input);
             trace!("output: {:?}", output);
-            write_frame(stream, output);
+            write_frame(stream, output)?;
         }
         2 => {
             let input = bincode::deserialize(input).unwrap();
             trace!("input: {:?}", input);
             let output = store.read().unwrap().sum(input);
             trace!("output: {:?}", output);
-            write_frame(stream, output);
+            write_frame(stream, output)?;
         }
         _ => unreachable!(),
     }
+    Ok(())
 }
 enum FrameErr {
     Timeout,
     EndOfStream,
 }
 /// Writes frame to stream
-fn write_frame(stream: &mut TcpStream, input: impl Serialize) {
+fn write_frame(stream: &mut TcpStream, input: impl Serialize) -> std::io::Result<()> {
     let serialized = bincode::serialize(&input).unwrap();
     let mut write_bytes = Vec::from(serialized.len().to_ne_bytes());
     write_bytes.extend(serialized);
-    stream.write_all(&write_bytes).unwrap();
+    stream.write_all(&write_bytes)
 }
 /// We read a frame from the stream, returning the function number and serialized input.
 ///
@@ -142,7 +147,12 @@ fn handle_stream(mut stream: TcpStream, exit: &Arc<Mutex<bool>>) {
         match read_frame(&mut stream, Duration::SECOND) {
             // Next value
             Ok((function_index, input)) => {
-                function_map(function_index, &input, &mut stream);
+                // Presume error as result of client disconnection
+                if let Err(err) = function_map(function_index, &input, &mut stream) {
+                    // TODO Restrict this to specific `.kind()`
+                    info!("write err: {:?}", err);
+                    return;
+                }
             }
             // End of stream
             Err(FrameErr::EndOfStream) => {

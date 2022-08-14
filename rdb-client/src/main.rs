@@ -29,6 +29,7 @@ enum CommunicationErr {
 impl From<std::io::Error> for CommunicationErr {
     fn from(io_err: std::io::Error) -> Self {
         info!("io_err: {:?}", io_err);
+        // TODO Restrict this to specific `.kind()`
         Self::Write(io_err)
     }
 }
@@ -114,7 +115,7 @@ impl Client {
     }
 
     #[logfn(ok = "TRACE", err = "ERROR")]
-    pub fn raw_sum(&mut self,set:Vec<u16>) -> CommunicationResult<SumReturn> {
+    pub fn raw_sum(&mut self, set: Vec<u16>) -> CommunicationResult<SumReturn> {
         // Write
         write_frame(&mut self.0, 2, set)?;
         // Read
@@ -189,7 +190,7 @@ fn stress_test(requests: u64, bar: &ProgressBar) {
         let function_result = match x {
             0 => client.get().is_ok(),
             1 => client.set(2).is_ok(),
-            2 => client.sum(vec![1,2,3,4,5,6,7,8,9]).is_ok(),
+            2 => client.sum(vec![1, 2, 3, 4, 5, 6, 7, 8, 9]).is_ok(),
             _ => unreachable!(),
         };
         assert!(function_result);

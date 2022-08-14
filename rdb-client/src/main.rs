@@ -14,7 +14,7 @@ fn handle_client(requests: u64, bar: &ProgressBar) {
     let mut stream = TcpStream::connect(ADDRESS).unwrap();
     let mut rng = rand::thread_rng();
     for _ in 0..requests {
-        let x: u32 = rng.gen_range(0..10);
+        let x: u32 = rng.gen_range(0..3);
 
         info!("x: {}", x);
 
@@ -63,7 +63,12 @@ fn handle_client(requests: u64, bar: &ProgressBar) {
 
         info!("y: {}", &y);
 
-        assert_eq!(y, x.overflowing_mul(2).0 + 12);
+        match x {
+            0 => assert_eq!(y, 2 * 12),
+            1 => assert_eq!(y, 3 * 12),
+            2 => assert_eq!(y, 4 * 12),
+            _ => unreachable!(),
+        };
 
         #[cfg(debug_assertions)]
         std::thread::sleep(Duration::from_secs(1));

@@ -1,12 +1,13 @@
 #![feature(duration_constants)]
 #![warn(clippy::pedantic)]
+use core::time;
 use std::io::{ErrorKind, Read, Write};
 use std::mem::{size_of, MaybeUninit};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::UnixDatagram;
 use std::ptr;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use log::{info, trace};
 use serde::{Deserialize, Serialize};
@@ -21,50 +22,118 @@ type Store = RwLock<Data>;
 struct Data {
     pub x: u16,
 }
+impl Data {
+    fn get(&self) -> u16 {
+        self.x
+    }
 
-// type QueryFn = fn(Arc<RwLock<Database>>, Vec<u8>) -> Vec<u8>;
-// static FUNCTIONS: [QueryFn; 1] = [|data: Arc<RwLock<Database>>, buf: Vec<u8>| {
-//     let y: u16 = bincode::deserialize(&buf).unwrap();
-//     let z = data.read().unwrap().x * y;
-//     bincode::serialize(&z).unwrap()
-// }];
+    fn set(&mut self, x: u16) {
+        self.x = x;
+    }
+}
+
+fn function_map(f: usize, input: Vec<u8>) -> Vec<u8> {
+    let store = unsafe { &**DATA.assume_init_ref() };
+    match f {
+        0 => bincode::serialize(&store.read().unwrap().get()),
+        1 => bincode::serialize(
+            &store
+                .write()
+                .unwrap()
+                .set(bincode::deserialize(&input).unwrap()),
+        ),
+        _ => unreachable!(),
+    }
+    .unwrap()
+}
+enum FrameErr {
+    Timeout,
+    EndOfStream,
+}
+
+/// We read a frame from the stream, returning the function number and serialized input.
+///
+/// A client could potentially indefinitely block a process transfer if we do not allow short
+/// circuiting `read_frame`. Since we do not want to drop client frames, but we do not want to block
+/// the transfer process, we have a timeout to `read_frame`.
+fn read_frame(stream: &mut TcpStream, timeout: Duration) -> Result<(usize, Vec<u8>), FrameErr> {
+    // A frame consists of:
+    // 1. A number defining the length of the input bytes (usize).
+    // 2. A function number (usize).
+    // 3. The input bytes (Vec<u8>).
+    const S: usize = size_of::<usize>();
+    const L: usize = 2 * S;
+    let mut bytes = vec![Default::default(); L];
+    let mut i = 0;
+
+    // Presume stream has been previously set as non-blocking
+    let start = Instant::now();
+    // While we haven't received the number defining the length of the input bytes.
+    while i < L {
+        match stream.read(&mut bytes[i..]) {
+            Ok(size) => {
+                i += size;
+            }
+            Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+            _ => unreachable!(),
+        }
+        if start.elapsed() > timeout {
+            return Err(FrameErr::Timeout);
+        }
+    }
+    let input_length = usize::from_ne_bytes(bytes[0..S].try_into().unwrap());
+    if input_length == 0 {
+        return Err(FrameErr::EndOfStream);
+    }
+
+    // Read input data bytes
+    let data_length = input_length - S;
+    let mut data_bytes = vec![Default::default(); data_length];
+    let mut j = 0;
+    while j != data_length {
+        match stream.read(&mut data_bytes[j..]) {
+            Ok(size) => {
+                j += size;
+            }
+            Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+            _ => unreachable!(),
+        }
+        if start.elapsed() > timeout {
+            return Err(FrameErr::Timeout);
+        }
+    }
+    // Returns function index and input data bytes
+    let function_index = usize::from_ne_bytes(bytes[S..L].try_into().unwrap());
+    Ok((function_index, data_bytes))
+}
 
 // Returns true when server received shutdown signal while processing client stream
 fn handle_stream(mut stream: TcpStream, exit: &Arc<Mutex<bool>>) {
     // TODO Check `server_socket` is blocking
     stream.set_nonblocking(true).unwrap();
-    let mut buf = [0; size_of::<u32>()];
     loop {
         // We read a u32 from the stream, multiply it by 2, then write it back.
-        match stream.read(&mut buf) {
+        match read_frame(&mut stream, Duration::SECOND) {
             // Next value
-            Ok(size) if size == 4 => {
-                let x = u32::from_ne_bytes(buf);
+            Ok((function_index, input)) => {
+                let return_bytes = {
+                    let output_bytes = function_map(function_index, input);
+                    trace!("output_bytes: {:?}", output_bytes);
+                    let length_bytes = output_bytes.len().to_ne_bytes();
+                    [Vec::from(length_bytes), output_bytes].concat()
+                };
 
-                trace!("x: {:?}", x);
-
-                let y = x.overflowing_mul(2).0;
-
-                trace!("y: {:?}", y);
-
-                let data = unsafe { &**DATA.assume_init_ref() };
-                let guard = data.read().unwrap();
-                let z = y + u32::from(guard.x);
-                trace!("z: {}", z);
-
-                let rtn_buf = z.to_ne_bytes();
-                let written = stream.write(&rtn_buf).unwrap();
+                let written = stream.write(&return_bytes).unwrap();
 
                 trace!("written: {:?}", written);
             }
             // End of stream
-            Ok(size) if size == 0 => {
+            Err(FrameErr::EndOfStream) => {
                 return;
             }
-            // Timeout
-            Err(err) if err.kind() == ErrorKind::WouldBlock => {}
-            // Other values are errors
-            _ => unreachable!(),
+            Err(FrameErr::Timeout) => {
+                unimplemented!()
+            }
         }
         // Exit signal set true
         if *exit.lock().unwrap() {

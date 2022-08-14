@@ -1,4 +1,5 @@
 #![feature(duration_constants)]
+#![feature(anonymous_lifetime_in_impl_trait)]
 #![warn(clippy::pedantic)]
 use core::time;
 use std::io::{ErrorKind, Read, Write};
@@ -23,39 +24,65 @@ struct Data {
     pub x: u16,
 }
 impl Data {
-    fn get(&self) -> u16 {
-        self.x
+    fn get(&self, _: ()) -> Result<u16, ()> {
+        Ok(self.x)
     }
 
-    fn set(&mut self, x: u16) {
+    fn set(&mut self, x: u16) -> Result<(), ()> {
         self.x = x;
+        Ok(())
+    }
+
+    fn sum(&self, set: Vec<u16>) -> Result<u16, ()> {
+        Ok(set.iter().sum::<u16>() * self.x)
     }
 }
-
-fn function_map(f: usize, input: Vec<u8>) -> Vec<u8> {
+/// Given function index function_index` and input `input`
+fn function_map(function_index: usize, input: &[u8], stream: &mut TcpStream) {
+    trace!("input: {:?}", input);
     let store = unsafe { &**DATA.assume_init_ref() };
-    match f {
-        0 => bincode::serialize(&store.read().unwrap().get()),
-        1 => bincode::serialize(
-            &store
-                .write()
-                .unwrap()
-                .set(bincode::deserialize(&input).unwrap()),
-        ),
+    match function_index {
+        0 => {
+            let input = bincode::deserialize(input).unwrap();
+            let output = store.read().unwrap().get(input);
+            trace!("output: {:?}", output);
+            write_frame(stream, output);
+        }
+        1 => {
+            let input = bincode::deserialize(input).unwrap();
+            trace!("input: {:?}", input);
+            let output = store.write().unwrap().set(input);
+            trace!("output: {:?}", output);
+            write_frame(stream, output);
+        }
+        2 => {
+            let input = bincode::deserialize(input).unwrap();
+            trace!("input: {:?}", input);
+            let output = store.read().unwrap().sum(input);
+            trace!("output: {:?}", output);
+            write_frame(stream, output);
+        }
         _ => unreachable!(),
     }
-    .unwrap()
 }
 enum FrameErr {
     Timeout,
     EndOfStream,
 }
-
+/// Writes frame to stream
+fn write_frame(stream: &mut TcpStream, input: impl Serialize) {
+    let serialized = bincode::serialize(&input).unwrap();
+    let mut write_bytes = Vec::from(serialized.len().to_ne_bytes());
+    write_bytes.extend(serialized);
+    stream.write_all(&write_bytes).unwrap();
+}
 /// We read a frame from the stream, returning the function number and serialized input.
 ///
 /// A client could potentially indefinitely block a process transfer if we do not allow short
 /// circuiting `read_frame`. Since we do not want to drop client frames, but we do not want to block
 /// the transfer process, we have a timeout to `read_frame`.
+///
+/// Presumes stream has been previously set as non-blocking
 fn read_frame(stream: &mut TcpStream, timeout: Duration) -> Result<(usize, Vec<u8>), FrameErr> {
     // A frame consists of:
     // 1. A number defining the length of the input bytes (usize).
@@ -66,7 +93,6 @@ fn read_frame(stream: &mut TcpStream, timeout: Duration) -> Result<(usize, Vec<u
     let mut bytes = vec![Default::default(); L];
     let mut i = 0;
 
-    // Presume stream has been previously set as non-blocking
     let start = Instant::now();
     // While we haven't received the number defining the length of the input bytes.
     while i < L {
@@ -116,16 +142,7 @@ fn handle_stream(mut stream: TcpStream, exit: &Arc<Mutex<bool>>) {
         match read_frame(&mut stream, Duration::SECOND) {
             // Next value
             Ok((function_index, input)) => {
-                let return_bytes = {
-                    let output_bytes = function_map(function_index, input);
-                    trace!("output_bytes: {:?}", output_bytes);
-                    let length_bytes = output_bytes.len().to_ne_bytes();
-                    [Vec::from(length_bytes), output_bytes].concat()
-                };
-
-                let written = stream.write(&return_bytes).unwrap();
-
-                trace!("written: {:?}", written);
+                function_map(function_index, &input, &mut stream);
             }
             // End of stream
             Err(FrameErr::EndOfStream) => {

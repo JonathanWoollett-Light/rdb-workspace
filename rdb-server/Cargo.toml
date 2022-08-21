@@ -8,6 +8,16 @@ edition = "2021"
 [dependencies]
 log = "0.4.17"
 simple_logger = "2.2.0"
-bincode = "1.3.3"
+
 serde = { version = "1.0.142", features = ["derive"] }
 shared-memory-allocator = { path="../shared-memory-allocator" }
+thiserror = "1.0.32"
+
+bincode = { version = "1.3.3", optional=true}
+serde_json = {version = "1.0.83", optional=true}
+
+
+[features]
+default = ["bincode"]
+bincode = ["dep:bincode"]
+json = ["dep:serde_json"]

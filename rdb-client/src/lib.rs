@@ -59,6 +59,7 @@ pub enum CommunicationErr {
     #[error("Failed to connect to server `TcpStream`.")]
     Connect(#[from] std::io::Error),
 }
+
 /// Result of user defined `get` query.
 type GetReturn = Result<u16, ()>;
 /// Result of user defined `set` query.
@@ -299,7 +300,6 @@ mod tests {
     use rand::Rng;
 
     use super::*;
-    #[test]
     fn main() {
         const REQUESTS_RANGE: std::ops::Range<u64> = 5_000_000..10_000_000;
         const CLIENTS: usize = 6;
@@ -326,7 +326,7 @@ mod tests {
         dbg!(now.elapsed());
     }
     fn stress_test(requests: u64, bar: &ProgressBar) {
-        let mut client = Client::new(ADDRESS);
+        let mut client = Client::new(ADDRESS).unwrap();
         let mut rng = rand::thread_rng();
         for _ in 0..requests {
             // Picks random query

@@ -24,21 +24,49 @@ use std::mem::{size_of, MaybeUninit};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::UnixDatagram;
 use std::ptr;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
+use clap::Parser;
 use log::{info, trace, SetLoggerError};
 use serde::{Deserialize, Serialize};
 use shared_memory_allocator::{
     SharedAllocator, SharedAllocatorNewMemoryError, SharedAllocatorNewProcessError,
 };
 
-/// Unix datagram for process transfer.
-const OLD_PROCESS: &str = "./old";
-/// Unix datagram for process transfer.
-const NEW_PROCESS: &str = "./new";
-/// Address for client connections.
-const ADDRESS: &str = "127.0.0.1:8080";
+/// Signal used to communicate across threads for shutdown.
+static EXIT_SIGNAL: AtomicBool = AtomicBool::new(false);
+
+/// Default address used for the TCP socket.
+const DEFAULT_ADDRESS: &str = "127.0.0.1:8080";
+/// Default path used for the old process unix socket.
+const DEFAULT_OLD_PROCESS_SOCKET: &str = "./old_process_socket";
+/// Default path used for the new process unix socket.
+const DEFAULT_NEW_PROCESS_SOCKET: &str = "./new_process_socket";
+/// Default path used for the file containing the shared memory id.
+const DEFAULT_SHARED_MEMORY_FILE: &str = "/tmp/rdb-server";
+
+/// Server command line arguments.
+#[derive(Debug, Parser)]
+#[clap(author, version, about, long_about = None)]
+struct Args {
+    /// Address for client connections.
+    #[clap(short, long, value_parser, default_value = DEFAULT_ADDRESS)]
+    address: String,
+    /// Unix datagram for process transfer.
+    #[clap(short, long, value_parser, default_value = DEFAULT_OLD_PROCESS_SOCKET)]
+    old_process_socket: String,
+    /// Unix datagram for process transfer.
+    #[clap(short, long, value_parser, default_value = DEFAULT_NEW_PROCESS_SOCKET)]
+    new_process_socket: String,
+    /// Log level
+    #[clap(short,long,value_parser,default_value_t=log::Level::Info)]
+    log_level: log::Level,
+    /// File used to synchronize the shared memory id.
+    #[clap(short, long, value_parser, default_value = DEFAULT_SHARED_MEMORY_FILE)]
+    shared_memory_file: String,
+}
 
 /// The data type storing `OldData`.
 type OldStore = RwLock<OldData>;
@@ -314,9 +342,6 @@ enum HandleStreamError {
     /// Failed to set client [`TcpStream`] to non-blocking.
     #[error("Failed to set client [`TcpStream`] to non-blocking: {0}")]
     SetNonBlocking(std::io::Error),
-    /// Failed to lock exit notification mutex.
-    #[error("Failed to lock exit notification mutex.")]
-    ExitNotificationLock,
     /// Failed to read frame from client stream.
     #[error("Failed to read frame from client stream: {0}")]
     FrameRead(ReadFrameError),
@@ -327,7 +352,7 @@ enum HandleStreamError {
 /// Returns when:
 /// - Client stream is shutdown.
 /// - Server set shutdown notification.
-fn handle_stream(mut stream: TcpStream, exit: &Arc<Mutex<bool>>) -> Result<(), HandleStreamError> {
+fn handle_stream(mut stream: TcpStream) -> Result<(), HandleStreamError> {
     // TODO Check `server_socket` is blocking
     stream
         .set_nonblocking(true)
@@ -354,14 +379,8 @@ fn handle_stream(mut stream: TcpStream, exit: &Arc<Mutex<bool>>) -> Result<(), H
             Err(ReadFrameError::Timeout) => return Ok(()),
             Err(err) => return Err(HandleStreamError::FrameRead(err)),
         }
-
-        // We cannot return `PoisonError`, thus we must discard information.
-        #[allow(clippy::map_err_ignore)]
-        let guard = exit
-            .lock()
-            .map_err(|_| HandleStreamError::ExitNotificationLock)?;
         // When exit signal set true
-        if *guard {
+        if EXIT_SIGNAL.load(Ordering::SeqCst) {
             return Ok(());
         }
     }
@@ -385,9 +404,6 @@ enum ProcessError {
     /// Failed to read client connection.
     #[error("Failed to read client connection: {0}")]
     ClientConnection(std::io::Error),
-    /// Failed to lock exit notification mutex.
-    #[error("Failed to lock exit notification mutex.")]
-    LockExit,
     /// Failed to read shutdown notification.
     #[error("Failed to read shutdown notification: {0}")]
     ShutdownNotification(std::io::Error),
@@ -414,16 +430,20 @@ enum ProcessError {
     #[error("Error while handling client connection: {0}")]
     Client(#[from] HandleStreamError),
 }
+
 /// Runs server process
-fn process(process_start: Instant) -> Result<(), ProcessError> {
-    // Exit signal
-    let exit = Arc::new(Mutex::new(false));
+fn process(
+    process_start: Instant,
+    old_process_socket: &str,
+    new_process_socket: &str,
+    address: &str,
+) -> Result<(), ProcessError> {
     // Thread handles
     let mut handles = Vec::new();
     // Once we receive something (indicating a new process has started) we then transfer data.
-    let socket = UnixDatagram::bind(OLD_PROCESS).map_err(ProcessError::SocketBind)?;
+    let socket = UnixDatagram::bind(old_process_socket).map_err(ProcessError::SocketBind)?;
     // Shutdown signal listener
-    let listener = TcpListener::bind(ADDRESS).map_err(ProcessError::ListenerBind)?;
+    let listener = TcpListener::bind(address).map_err(ProcessError::ListenerBind)?;
 
     // Sets streams to non-blocking
     listener
@@ -437,34 +457,35 @@ fn process(process_start: Instant) -> Result<(), ProcessError> {
     info!("ready to receive connections");
 
     // Work loop
-    loop {
+    let transfer = loop {
         // Accept incoming streams
         match listener.accept() {
             Ok((stream, client_socket)) => {
                 info!("client_socket: {:?}", client_socket);
-
-                let exit_clone = Arc::clone(&exit);
-                let handle = std::thread::spawn(move || handle_stream(stream, &exit_clone));
+                let handle = std::thread::spawn(move || handle_stream(stream));
                 handles.push(handle);
             }
             Err(err) if err.kind() == ErrorKind::WouldBlock => {}
             Err(err) => return Err(ProcessError::ClientConnection(err)),
         }
-        // Check for shutdown notification
+        // Check for shutdown notification from successor process
         match socket.recv(&mut []) {
             // Received shutdown signal
             Ok(_) => {
                 // We set exit signal to true
-                // We cannot return `PoisonError`, thus we must discard information.
-                #[allow(clippy::map_err_ignore)]
-                let mut exit_guard = exit.lock().map_err(|_| ProcessError::LockExit)?;
-                *exit_guard = true;
-                break;
+                EXIT_SIGNAL.store(true, std::sync::atomic::Ordering::SeqCst);
+                // We break, noting we do need to transfer data to a successor process.
+                break true;
             }
             Err(err) if err.kind() == ErrorKind::WouldBlock => {}
             Err(err) => return Err(ProcessError::ShutdownNotification(err)),
         }
-    }
+        // Exit signal can also be set when we catch `SIGINT` (e.g. ctrl-c).
+        if EXIT_SIGNAL.load(Ordering::SeqCst) {
+            // We break, noting we do not need to transfer data to a successor process.
+            break false;
+        }
+    };
     // We await all threads finishing.
     let now = Instant::now();
     info!("awaiting threads");
@@ -472,32 +493,37 @@ fn process(process_start: Instant) -> Result<(), ProcessError> {
         handle.join().map_err(ProcessError::JoinThread)??;
     }
     info!("awaited threads: {:?}", now.elapsed());
-    // Set our unix socket to blocking
-    socket
-        .set_nonblocking(false)
-        .map_err(ProcessError::SocketBlockingAfter)?;
 
-    // Send the data offset to the unix socket (for the successor server process)
-    // Get data offset
-    // SAFETY:
-    // We know both `DATA` and `ALLOCATOR` have been initialized, are not being currently accessed,
-    // and will not be accessed after.
-    let data_offset = unsafe {
-        let addr = DATA.assume_init_ref().to_bits();
-        addr.checked_sub(ALLOCATOR.assume_init_ref().address())
-            .ok_or(ProcessError::Offset)?
-    };
-    info!("data_offset: {data_offset}");
-    // Send data offset
-    socket
-        .send_to(&data_offset.to_ne_bytes(), NEW_PROCESS)
-        .map_err(ProcessError::Send)?;
-    info!("sent data");
+    // If we are transferring to a successor process.
+    if transfer {
+        // Set our unix socket to blocking
+        socket
+            .set_nonblocking(false)
+            .map_err(ProcessError::SocketBlockingAfter)?;
 
-    // Clear `OLD_PROCESS` unix datagram file descriptor. When the transition is completed from this
-    // to its successor process, this successor process must be able to create and use this datagram
-    // for when it must transition.
-    std::fs::remove_file(OLD_PROCESS).map_err(ProcessError::RemoveOldProcessDatagram)?;
+        // Send the data offset to the unix socket (for the successor server process)
+        // Get data offset
+        // SAFETY:
+        // We know both `DATA` and `ALLOCATOR` have been initialized, are not being currently
+        // accessed, and will not be accessed after.
+        let data_offset = unsafe {
+            let addr = DATA.assume_init_ref().to_bits();
+            addr.checked_sub(ALLOCATOR.assume_init_ref().address())
+                .ok_or(ProcessError::Offset)?
+        };
+        info!("data_offset: {data_offset}");
+        // Send data offset
+        socket
+            .send_to(&data_offset.to_ne_bytes(), new_process_socket)
+            .map_err(ProcessError::Send)?;
+        info!("sent data");
+    }
+
+    // Clear `OLD_PROCESS` unix datagram file descriptor.
+    // When the transition is completed from this to its successor process, this successor process
+    // must be able to create and use this datagram for when it must transition.
+    // Or on `SIGINT` we want to clean up and gracefully exit.
+    std::fs::remove_file(old_process_socket).map_err(ProcessError::RemoveOldProcessDatagram)?;
     Ok(())
 }
 
@@ -520,6 +546,9 @@ static mut DATA: MaybeUninit<*mut Store> = MaybeUninit::uninit();
 /// This handles case where we would otherwise need to call `unwrap` (which we disallow).
 #[derive(Debug, thiserror::Error)]
 enum MainError {
+    /// Failed to set Ctrl-C handler.
+    #[error("Failed to set Ctrl-C handler: {0}")]
+    CtrlC(#[from] ctrlc::Error),
     /// Failed to initialize logger.
     #[error("Failed to initialize logger: {0}")]
     Logger(#[from] SetLoggerError),
@@ -557,19 +586,25 @@ enum MainError {
 }
 
 fn main() -> Result<(), MainError> {
+    ctrlc::set_handler(|| EXIT_SIGNAL.store(true, Ordering::SeqCst))?;
+
+    let args = Args::parse();
+
     let now = Instant::now();
-    simple_logger::init_with_level(log::Level::Info)?;
+    simple_logger::init_with_level(args.log_level)?;
     info!("started");
 
     //  If an old process exists
-    if std::path::Path::new(OLD_PROCESS).exists() {
+    if std::path::Path::new(&args.old_process_socket).exists() {
         info!("non-first");
 
         // We create the socket on which to send the shutdown notification
-        let socket = UnixDatagram::bind(NEW_PROCESS).map_err(MainError::Socket)?;
+        let socket = UnixDatagram::bind(&args.new_process_socket).map_err(MainError::Socket)?;
 
         // Send shutdown notification to old process
-        socket.send_to(&[], OLD_PROCESS).map_err(MainError::Send)?;
+        socket
+            .send_to(&[], &args.old_process_socket)
+            .map_err(MainError::Send)?;
 
         // Await data offset (which also serves as notification old process has terminated)
         let mut buf = [0; size_of::<usize>()];
@@ -581,7 +616,7 @@ fn main() -> Result<(), MainError> {
         // SAFETY:
         // At the moment this is not safe, further work is required here.
         let allocator = unsafe {
-            SharedAllocator::new_process("/tmp/rdb-server")
+            SharedAllocator::new_process(&args.shared_memory_file)
                 .map_err(MainError::NewProcessAllocator)?
         };
         info!("allocator.address(): {}", allocator.address());
@@ -633,15 +668,21 @@ fn main() -> Result<(), MainError> {
 
         // Clear `NEW_PROCESS` unix datagram file descriptor. When successor process to this one is
         // started it must be able to create and use this stream.
-        std::fs::remove_file(NEW_PROCESS).map_err(MainError::RemoveNewProcessDatagram)?;
+        std::fs::remove_file(&args.new_process_socket)
+            .map_err(MainError::RemoveNewProcessDatagram)?;
 
-        process(now)?;
+        process(
+            now,
+            &args.old_process_socket,
+            &args.new_process_socket,
+            &args.address,
+        )?;
     } else {
         info!("first");
         // SAFETY:
         // At the moment this is not safe, further work is required here.
         let allocator = unsafe {
-            SharedAllocator::new_memory("/tmp/rdb-server", GB)
+            SharedAllocator::new_memory(&args.shared_memory_file, GB)
                 .map_err(MainError::NewMemoryAllocator)?
         };
         let ptr = <*mut u8>::from_bits(allocator.address());
@@ -660,7 +701,40 @@ fn main() -> Result<(), MainError> {
             ALLOCATOR.write(allocator);
             DATA.write(data_ptr);
         }
-        process(now)?;
+        process(
+            now,
+            &args.old_process_socket,
+            &args.new_process_socket,
+            &args.address,
+        )?;
     }
     Ok(())
+}
+#[cfg(test)]
+mod tests {
+    use super::{
+        DEFAULT_NEW_PROCESS_SOCKET, DEFAULT_OLD_PROCESS_SOCKET, DEFAULT_SHARED_MEMORY_FILE,
+    };
+    const CARGO_BIN: &str = "/home/jonathan/.cargo/bin/cargo";
+    use std::path::Path;
+
+    #[test]
+    fn graceful_interrupt() {
+        // Start
+        let child = std::process::Command::new(CARGO_BIN)
+            .arg("run")
+            .spawn()
+            .unwrap();
+
+        // Stop
+        unsafe {
+            // Interrupt server (`ctrl+c`)
+            libc::kill(child.id() as i32, libc::SIGINT);
+        }
+
+        // Check cleanup
+        assert!(!Path::new(DEFAULT_NEW_PROCESS_SOCKET).exists());
+        assert!(!Path::new(DEFAULT_OLD_PROCESS_SOCKET).exists());
+        assert!(!Path::new(DEFAULT_SHARED_MEMORY_FILE).exists());
+    }
 }

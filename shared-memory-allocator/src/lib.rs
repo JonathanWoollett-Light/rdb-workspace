@@ -21,12 +21,14 @@ use std::alloc::{AllocError, Layout};
 use std::io::{Read, Write};
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
-use log::{error, info};
+use log::{error, info, trace};
+use log_derive::logfn;
 
 /// The description of shared memory stored within the shared memory.
+#[derive(Debug)]
 struct InMemoryDescription {
     /// The number of processes currently attached to this shared memory.
     count: AtomicU8,
@@ -52,6 +54,7 @@ mod bindings;
 /// At the moment, both allocation and deallocation of memory functions like pushing and
 /// removing element from a vector (e.g. very inefficient), this is something which will be
 /// improved moving forward.
+#[derive(Debug)]
 pub struct SharedAllocator(usize);
 
 /// A description of shared memory stored in a map in attached processes.
@@ -143,24 +146,26 @@ impl SharedAllocator {
     /// Since rust doesn't support static members on structs, we do this.
     #[must_use]
     #[inline]
+    #[logfn(Trace)]
     pub fn shared_memory_description_map() -> Arc<Mutex<SharedMemoryData>> {
-        /// Used to ensure one time initialization of `SHARED_MEMORY_DESCRIPTION_MAP`
-        static INIT: AtomicBool = AtomicBool::new(false);
         // Counts instance non-dropped shared allocators in this process pointing to the same shared
         // memory.
         // (file, id, ptr, count)
-
         /// Static memory holding structures used to store the description of all shared memory
         /// attached to this process.
         static mut SHARED_MEMORY_DESCRIPTION_MAP: MaybeUninit<Arc<Mutex<SharedMemoryData>>> =
             MaybeUninit::uninit();
-        if !INIT.swap(true, Ordering::SeqCst) {
+        /// Static used to ensure initialization of `SHARED_MEMORY_DESCRIPTION_MAP` once.
+        static INIT_SHARED_MEMORY_DESCRIPTION_MAP: std::sync::Once = std::sync::Once::new();
+        INIT_SHARED_MEMORY_DESCRIPTION_MAP.call_once(|| {
+            trace!("initializing shared memory description map");
             // SAFETY:
             // The write only occurs once, as it is guarded by `INIT`.
             unsafe {
                 SHARED_MEMORY_DESCRIPTION_MAP.write(Arc::new(Mutex::new(Vec::new())));
             }
-        }
+            trace!("initialized shared memory description map");
+        });
         // SAFETY:
         // `SHARED_MEMORY_DESCRIPTION_MAP` is initialized in this function, immediately above this
         // line.
@@ -169,7 +174,8 @@ impl SharedAllocator {
 
     /// Returns address of the shared memory in the process memory (`self.0`).
     #[must_use]
-    pub const fn address(&self) -> usize {
+    #[logfn(Trace)]
+    pub fn address(&self) -> usize {
         self.0
     }
 
@@ -185,6 +191,7 @@ impl SharedAllocator {
     ///
     /// For a whole lot of reasons. This is not a production ready library, it is a toy, treat it as
     /// such.
+    #[logfn(Trace)]
     pub unsafe fn new(shmid_path: &str, size: usize) -> Result<Self, SharedAllocatorNewError> {
         info!("SharedAllocator::new");
         // Acquire reference to map of all shared allocators in this process
@@ -286,6 +293,7 @@ impl SharedAllocator {
     ///
     /// For a whole lot of reasons. This is not a production ready library, it is a toy, treat it as
     /// such.
+    #[logfn(Trace)]
     pub unsafe fn new_memory(
         shmid_path: &str,
         size: usize,
@@ -336,6 +344,10 @@ impl SharedAllocator {
 
         // Update allocator map and drop guard
         guard.push((String::from(shmid_path), shmid, shared_mem_ptr.to_bits(), 1));
+        trace!("updated allocator map and dropped guard");
+
+        // panic!("got here?");
+
         // Return allocator
         Ok(Self(shared_mem_ptr.to_bits()))
     }
@@ -354,6 +366,7 @@ impl SharedAllocator {
     ///
     /// For a whole lot of reasons. This is not a production ready library, it is a toy, treat it as
     /// such.
+    #[logfn(Trace)]
     pub unsafe fn new_process(shmid_path: &str) -> Result<Self, SharedAllocatorNewProcessError> {
         info!("SharedAllocator::new_process");
         // Acquire reference to map of all shared allocators in this process
@@ -397,24 +410,44 @@ impl Drop for SharedAllocator {
     // We cannot return a result here, and we do not want to use [`Result::unchecked_unwrap`], so we
     // allow `expect`s here.
     #[allow(clippy::expect_used, clippy::pattern_type_mismatch)]
+    #[logfn(Trace)]
     fn drop(&mut self) {
         let map = Self::shared_memory_description_map();
+
         let mut guard = map
             .lock()
             .expect("Failed to lock shared memory description");
 
-        let (shmid_path, shmid, _address, count) = guard
+        let (index, shared_memory_description) = guard
             .iter_mut()
-            .find(|&&mut (_, _, ptr, _)| ptr == self.0)
+            .enumerate()
+            .find(|(_, (_, _, ptr, _))| *ptr == self.0)
             .expect("Failed to find shared memory description");
+        trace!(
+            "(shmid_path, shmid, _address, count): {:?}",
+            shared_memory_description
+        );
+        let (shmid_path, shmid, _address, count) = shared_memory_description;
 
-        // Decrement number of allocators in this process
+        // Decrement number of allocators in this process attached to this shared memory
         *count = count
             .checked_sub(1)
             .expect("Failed to decrement count of allocators");
-        // If last allocator in this process
+        // If last allocator in this process attached to this shared memory
         let last_process_allocator = *count == 0;
+        trace!("last_process_allocator: {}", last_process_allocator);
+
         if last_process_allocator {
+            // Gets reference to shared memory description.
+            // SAFETY:
+            // Always safe.
+            let description = unsafe { &*<*mut InMemoryDescription>::from_bits(self.0) };
+            trace!("description: {:?}", description);
+
+            // Decrement number of processes attached to this shared memory.
+            let last_global_allocator = description.count.fetch_sub(1, Ordering::SeqCst) == 1;
+            trace!("last_global_allocator: {}", last_global_allocator);
+
             // Detach shared memory
             // SAFETY:
             // TODO: Write more here.
@@ -422,12 +455,8 @@ impl Drop for SharedAllocator {
                 bindings::detach_shared_memory(<*const libc::c_void>::from_bits(self.0))
                     .expect("Failed to detach shared memory");
             }
-            // Gets reference to shared memory description.
-            // SAFETY:
-            // Always safe.
-            let description = unsafe { &*<*mut InMemoryDescription>::from_bits(self.0) };
-            // Decrement number of processes with allocators
-            let last_global_allocator = description.count.fetch_sub(1, Ordering::SeqCst) == 1;
+
+            // If last process attached to this shared memory.
             if last_global_allocator {
                 // De-allocate shared memory
                 // SAFETY:
@@ -441,12 +470,18 @@ impl Drop for SharedAllocator {
                 info!("deleting shmid file: {}", shmid_path);
                 std::fs::remove_file(shmid_path).expect("Failed to remove shmid file");
             }
+
+            // Drops shared memory description.
+            // Since this was last allocator in this process we no longer need a description for
+            // this shared memory.
+            guard.remove(index);
         }
     }
 }
 // SAFETY:
 // Always safe.
 unsafe impl std::alloc::Allocator for SharedAllocator {
+    #[logfn(Trace)]
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         // To allocate memory we need a write lock to the length
         // SAFETY:
@@ -482,6 +517,7 @@ unsafe impl std::alloc::Allocator for SharedAllocator {
     }
 
     #[allow(clippy::significant_drop_in_scrutinee)]
+    #[logfn(Trace)]
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
         // To de-allocate memory we need a write lock to the length
         let description = &*<*mut InMemoryDescription>::from_bits(self.0);
@@ -509,40 +545,100 @@ unsafe impl std::alloc::Allocator for SharedAllocator {
 }
 
 #[cfg(test)]
+#[allow(clippy::print_stdout)]
 mod tests {
-    use std::time::Duration;
+    use std::path::Path;
+
+    use const_format::concatcp;
+    use sequential_test::sequential;
 
     use super::*;
 
-    const PAGE_SIZE: usize = 4096; // 4kb
-    const SIZE: usize = PAGE_SIZE; // 4mb
+    // Create link to cargo binary e.g. `sudo ln -s /home/$USER/.cargo/bin/cargo /usr/bin/cargo`
+
+    // const KB:usize = 1024;
+    // const MB:usize = 1024*KB;
+    // const GB:usize = 1024 * MB;
+    // use quote::quote;
+    // use std::process::Command;
+    // use std::fs::{File, OpenOptions};
+    // use std::io::Write;
+    // const TEST_PREFIX:&str = "__rbd_test_";
+    static INIT_LOGGER: std::sync::Once = std::sync::Once::new();
+
+    const DIR: &str = "/tmp/";
+    const TAG: &str = "__rdb_";
+    const TEST_FILE_PREFIX: &str = concatcp!(DIR, TAG);
+    const CARGO_BIN: &str = "/home/jonathan/.cargo/bin/cargo";
+
+    // We need to run tests sequentially as they rely on checking the shared memory description
+    // attached to this process. This description would not have a deterministic state if tests
+    // were ran in parallel.
+
+    // Tests creating and dropping an allocator with shared memory not previously existing.
     #[test]
-    fn main() {
-        let shmid_file: &str = "/tmp/shmid";
+    #[sequential]
+    fn new_memory() {
+        // Init logger
+        INIT_LOGGER.call_once(|| {
+            simple_logger::SimpleLogger::new().init().unwrap();
+        });
+        // Test
+        const SHMID: &str = concatcp!(TEST_FILE_PREFIX, "new_memory");
+        assert!(!Path::new(SHMID).exists(), "{}", SHMID);
 
-        let first = !std::path::Path::new(shmid_file).exists();
-        dbg!(first);
+        let shared_memory_description_map = SharedAllocator::shared_memory_description_map();
+        assert!(shared_memory_description_map.lock().unwrap().is_empty());
 
-        #[allow(clippy::same_item_push)]
-        if first {
-            let shared_allocator = unsafe { SharedAllocator::new(shmid_file, SIZE) };
-            let mut x = Vec::<u8, _>::new_in(shared_allocator.clone());
-            for _ in 0..10 {
-                x.push(7);
-            }
-            dbg!(x.into_raw_parts());
-            let mut y = Vec::<u8, _>::new_in(shared_allocator.clone());
-            for _ in 0..20 {
-                y.push(69);
-            }
-            dbg!(y.into_raw_parts());
-            let mut z = Vec::<u8, _>::new_in(shared_allocator);
-            for _ in 0..5 {
-                z.push(220);
-            }
-            dbg!(z.into_raw_parts());
-        }
+        let shared_memory = unsafe { SharedAllocator::new_memory(SHMID, 1024 * 1024).unwrap() };
+        assert!(Path::new(SHMID).exists());
+        assert_eq!(shared_memory_description_map.lock().unwrap().len(), 1);
 
-        std::thread::sleep(Duration::from_secs(20));
+        drop(shared_memory);
+        assert!(!Path::new(SHMID).exists());
+        assert!(shared_memory_description_map.lock().unwrap().is_empty());
     }
+    // Tests creating and dropping an allocator with shared memory previously created by a different
+    // process.
+    #[test]
+    #[sequential]
+    fn new_process() {
+        // Init logger
+        INIT_LOGGER.call_once(|| {
+            simple_logger::SimpleLogger::new().init().unwrap();
+        });
+        // Test
+        const SHMID: &str = concatcp!(TEST_FILE_PREFIX, "new_process");
+        assert!(!Path::new(SHMID).exists(), "{}", SHMID);
+
+        let shared_memory_description_map = SharedAllocator::shared_memory_description_map();
+        assert!(shared_memory_description_map.lock().unwrap().is_empty());
+
+        let shared_memory = unsafe { SharedAllocator::new_memory(SHMID, 1024 * 1024).unwrap() };
+        assert!(Path::new(SHMID).exists());
+        assert_eq!(shared_memory_description_map.lock().unwrap().len(), 1);
+
+        // Create new process with shared memory allocator point to the same shared memory.
+        let output = std::process::Command::new(CARGO_BIN)
+            .args(["run", "--bin", "new_process"])
+            .output()
+            .unwrap();
+        // Assert exit okay
+        assert_eq!(output.status.code(), Some(0));
+
+        // Check outputs
+        let stdout = std::str::from_utf8(&output.stdout).unwrap();
+        println!("stdout: \"\n{}\"", stdout);
+        let stderr = std::str::from_utf8(&output.stderr).unwrap();
+        println!("stderr: \"\n{}\"", stderr);
+
+        // Drop memory
+        drop(shared_memory);
+        assert!(!Path::new(SHMID).exists());
+        assert!(shared_memory_description_map.lock().unwrap().is_empty());
+    }
+    // Chain processes which each push 1 value to a vector stored in the shared memory.
+    #[test]
+    #[sequential]
+    fn chain() {}
 }

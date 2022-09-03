@@ -17,3 +17,9 @@ libc = "0.2.127"
 rand = "0.8.5"
 log = "0.4.17"
 thiserror = "1.0.32"
+log-derive = "0.4.1"
+const_format = "0.2.26"
+
+[dev-dependencies]
+simple_logger = "2.3.0"
+sequential-test = { git = "https://github.com/JonathanWoollett-Light/sequential-test/" }

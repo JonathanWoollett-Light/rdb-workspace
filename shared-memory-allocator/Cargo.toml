@@ -13,13 +13,12 @@ readme = "README.md"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-libc = "0.2.127"
+libc = {version="0.2.127",features=["extra_traits"]}
 rand = "0.8.5"
 log = "0.4.17"
 thiserror = "1.0.32"
 log-derive = "0.4.1"
-const_format = "0.2.26"
 
 [dev-dependencies]
 simple_logger = "2.3.0"
-sequential-test = { git = "https://github.com/JonathanWoollett-Light/sequential-test/" }
+sequential-test = "0.1.4"

@@ -1,29 +1,87 @@
-use libc::c_void;
+#![allow(
+    clippy::restriction,
+    clippy::missing_errors_doc,
+    clippy::missing_safety_doc
+)]
+use std::mem::MaybeUninit;
+
 use log::trace;
-use log_derive::logfn;
-/// Allocate shared memory
+use log_derive::{logfn, logfn_inputs};
+
+pub fn shared_memory_capacity(shmid: i32) -> Result<usize, i32> {
+    shared_memory_description(shmid).map(|x| x.shm_segsz)
+}
+
+/// Returns some `shmid` for a given `key` is the shared memory is allocated, otherwise returns
+/// none.
+pub fn shared_memory_allocated(key: i32) -> Result<Option<i32>, i32> {
+    let res = unsafe { libc::shmget(key, Default::default(), libc::IPC_EXCL) };
+    let errno = errno();
+    trace!("res: {}", res);
+    match (res, errno) {
+        // > No segment exists for the given key, and IPC_CREAT was not specified.
+        (-1i32, libc::ENOENT) => Ok(None),
+        (-1i32, _) => Err(errno),
+        (res, _) => Ok(Some(res)),
+        // The documentation specifies:
+        // > A valid segment identifier, shmid, is returned on success, -1 on error.
+        // Therefore this is safe.
+        #[allow(clippy::unreachable)]
+        _ => unreachable!(),
+    }
+}
+/// Allocate shared memory.
 ///
 /// <https://linux.die.net/man/2/shmget>
 #[logfn(Trace)]
-pub unsafe fn allocate_shared_memory(size: usize) -> Result<i32, i32> {
-    let shmid = libc::shmget(libc::IPC_PRIVATE, size, libc::IPC_CREAT);
-    trace!("shmid: {shmid}");
-    // trace!("errno(): {}",errno());
-    match shmid {
+#[logfn_inputs(Trace)]
+pub fn allocate_shared_memory(key: Option<i32>, size: usize) -> Result<i32, i32> {
+    debug_assert!(key != Some(libc::IPC_PRIVATE));
+    const PERMISSIONS: i32 = (libc::S_IRGRP
+        | libc::S_IROTH
+        | libc::S_IRUSR
+        | libc::S_IWGRP
+        | libc::S_IWOTH
+        | libc::S_IWUSR) as i32;
+    let allocated_shmid = unsafe {
+        libc::shmget(
+            key.unwrap_or(libc::IPC_PRIVATE),
+            size,
+            libc::IPC_CREAT | PERMISSIONS,
+        )
+    };
+    trace!("allocated_shmid: {allocated_shmid}");
+    match allocated_shmid {
         -1i32 => Err(errno()),
-        _ => Ok(shmid),
+        _ => Ok(allocated_shmid),
     }
 }
-
-/// Attach shared memory to this process.
+/// Gets the `shmid_ds` structure via <https://linux.die.net/man/2/shmctl>.
+#[logfn(Trace)]
+#[logfn_inputs(Trace)]
+pub fn shared_memory_description(shmid: i32) -> Result<libc::shmid_ds, i32> {
+    let mut description: MaybeUninit<libc::shmid_ds> = MaybeUninit::uninit();
+    let res = unsafe { libc::shmctl(shmid, libc::IPC_STAT, description.as_mut_ptr()) };
+    match res {
+        0i32 => Ok(unsafe { description.assume_init_read() }),
+        -1i32 => Err(errno()),
+        // The documentation specifies:
+        // > Other operations return 0 on success.
+        // > On error, -1 is returned, and errno is set appropriately.
+        // Therefore this is safe.
+        #[allow(clippy::unreachable)]
+        _ => unreachable!(),
+    }
+}
+/// Attach shared memory to this process. If memory is already attached, does nothing.
 ///
 /// <https://linux.die.net/man/2/shmat>
 #[logfn(Trace)]
-pub unsafe fn attach_shared_memory(id: i32) -> Result<*mut c_void, i32> {
-    let shared_mem_ptr = libc::shmat(id, std::ptr::null(), 0);
+#[logfn_inputs(Trace)]
+pub fn attach_shared_memory(shmid: i32) -> Result<*mut libc::c_void, i32> {
+    let shared_mem_ptr = unsafe { libc::shmat(shmid, std::ptr::null(), 0) };
     trace!("shared_mem_ptr: {shared_mem_ptr:?}");
-    // trace!("errno(): {}",errno());
-    // TODO Is this right?
+
     #[allow(clippy::as_conversions)]
     if shared_mem_ptr as isize == -1 {
         Err(errno())
@@ -35,35 +93,29 @@ pub unsafe fn attach_shared_memory(id: i32) -> Result<*mut c_void, i32> {
 ///
 /// <https://linux.die.net/man/2/shmdt>
 #[logfn(Trace)]
-pub unsafe fn detach_shared_memory(ptr: *const libc::c_void) -> Result<(), i32> {
-    let rtn = libc::shmdt(ptr);
-    // trace!("errno(): {}",errno());
+#[logfn_inputs(Trace)]
+pub fn detach_shared_memory(ptr: *const libc::c_void) -> Result<(), i32> {
+    let rtn = unsafe { libc::shmdt(ptr) };
     match rtn {
         0i32 => Ok(()),
         -1i32 => Err(errno()),
-        #[cfg(debug_assertions)]
-        #[allow(clippy::unreachable)]
-        _ => unreachable!(),
         // The documentation specifies:
         // > On success shmdt() returns 0; on error -1 is returned
         // Therefore this is safe.
-        #[cfg(not(debug_assertions))]
-        _ => std::hint::unreachable_unchecked(),
+        #[allow(clippy::unreachable)]
+        _ => unreachable!(),
     }
 }
 /// Deallocate shared memory.
 ///
 /// <https://linux.die.net/man/2/shmctl>
 #[logfn(Trace)]
-pub unsafe fn deallocate_shared_memory(id: i32) -> Result<(), i32> {
-    let rtn = libc::shmctl(id, libc::IPC_RMID, std::ptr::null_mut());
-    // trace!("errno(): {}",errno());
+#[logfn_inputs(Trace)]
+pub fn deallocate_shared_memory(shmid: i32) -> Result<(), i32> {
+    let rtn = unsafe { libc::shmctl(shmid, libc::IPC_RMID, std::ptr::null_mut()) };
     match rtn {
         0i32 => Ok(()),
         -1i32 => Err(errno()),
-        #[cfg(debug_assertions)]
-        #[allow(clippy::unreachable)]
-        _ => unreachable!(),
         // The documentation specifies:
         // > A successful IPC_INFO or SHM_INFO operation returns the index of the highest used 
         // > entry in the kernel's internal array recording information about all shared memory segments.
@@ -72,8 +124,8 @@ pub unsafe fn deallocate_shared_memory(id: i32) -> Result<(), i32> {
         // > whose index was given in shmid. Other operations return 0 on success.
         // > On error, -1 is returned, and errno is set appropriately.
         // Therefore this is safe.
-        #[cfg(not(debug_assertions))]
-        _ => std::hint::unreachable_unchecked(),
+        #[allow(clippy::unreachable)]
+        _ => unreachable!(),
     }
 }
 /// Returns [`errno`](https://man7.org/linux/man-pages/man3/errno.3.html).

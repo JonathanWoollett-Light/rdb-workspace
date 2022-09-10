@@ -19,11 +19,10 @@ serde_json = {version = "1.0.83", optional=true}
 ctrlc = "3.2.3" # Catching `SIGINT` (e.g. `ctrl-c`)
 clap = {version="3.2.20",features=["derive"]}
 
-
-
 [dev-dependencies]
 criterion = "0.3"
 libc = "0.2.132"
+sequential-test = { git = "https://github.com/JonathanWoollett-Light/sequential-test/" }
 
 [features]
 default = ["bincode"]

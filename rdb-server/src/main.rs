@@ -41,11 +41,11 @@ static EXIT_SIGNAL: AtomicBool = AtomicBool::new(false);
 /// Default address used for the TCP socket.
 const DEFAULT_ADDRESS: &str = "127.0.0.1:8080";
 /// Default path used for the old process unix socket.
-const DEFAULT_OLD_PROCESS_SOCKET: &str = "./old_process_socket";
+const DEFAULT_OLD_PROCESS_SOCKET: &str = "/tmp/old_process_socket";
 /// Default path used for the new process unix socket.
-const DEFAULT_NEW_PROCESS_SOCKET: &str = "./new_process_socket";
+const DEFAULT_NEW_PROCESS_SOCKET: &str = "/tmp/new_process_socket";
 /// Default path used for the file containing the shared memory id.
-const DEFAULT_SHARED_MEMORY_FILE: &str = "/tmp/rdb-server";
+const DEFAULT_SHARED_MEMORY_ID: i32 = 456_859i32;
 
 /// Server command line arguments.
 #[derive(Debug, Parser)]
@@ -61,11 +61,11 @@ struct Args {
     #[clap(short, long, value_parser, default_value = DEFAULT_NEW_PROCESS_SOCKET)]
     new_process_socket: String,
     /// Log level
-    #[clap(short,long,value_parser,default_value_t=log::Level::Info)]
+    #[clap(short,long,value_parser,default_value_t = log::Level::Info)]
     log_level: log::Level,
     /// File used to synchronize the shared memory id.
-    #[clap(short, long, value_parser, default_value = DEFAULT_SHARED_MEMORY_FILE)]
-    shared_memory_file: String,
+    #[clap(short, long, value_parser, default_value_t = DEFAULT_SHARED_MEMORY_ID)]
+    shared_memory_id: i32,
 }
 
 /// The data type storing `OldData`.
@@ -474,6 +474,7 @@ fn process(
             Ok(_) => {
                 // We set exit signal to true
                 EXIT_SIGNAL.store(true, std::sync::atomic::Ordering::SeqCst);
+                info!("transfer");
                 // We break, noting we do need to transfer data to a successor process.
                 break true;
             }
@@ -482,6 +483,7 @@ fn process(
         }
         // Exit signal can also be set when we catch `SIGINT` (e.g. ctrl-c).
         if EXIT_SIGNAL.load(Ordering::SeqCst) {
+            info!("interrupt");
             // We break, noting we do not need to transfer data to a successor process.
             break false;
         }
@@ -493,6 +495,8 @@ fn process(
         handle.join().map_err(ProcessError::JoinThread)??;
     }
     info!("awaited threads: {:?}", now.elapsed());
+
+    info!("transfer: {}", transfer);
 
     // If we are transferring to a successor process.
     if transfer {
@@ -616,7 +620,7 @@ fn main() -> Result<(), MainError> {
         // SAFETY:
         // At the moment this is not safe, further work is required here.
         let allocator = unsafe {
-            SharedAllocator::new_process(&args.shared_memory_file)
+            SharedAllocator::new_process(args.shared_memory_id)
                 .map_err(MainError::NewProcessAllocator)?
         };
         info!("allocator.address(): {}", allocator.address());
@@ -682,7 +686,7 @@ fn main() -> Result<(), MainError> {
         // SAFETY:
         // At the moment this is not safe, further work is required here.
         let allocator = unsafe {
-            SharedAllocator::new_memory(&args.shared_memory_file, GB)
+            SharedAllocator::new_memory(args.shared_memory_id, GB)
                 .map_err(MainError::NewMemoryAllocator)?
         };
         let ptr = <*mut u8>::from_bits(allocator.address());
@@ -717,8 +721,10 @@ mod tests {
     };
     const CARGO_BIN: &str = "/home/jonathan/.cargo/bin/cargo";
     use std::path::Path;
+    // use sequential_test::sequential;
 
     #[test]
+    // #[sequential]
     fn graceful_interrupt() {
         // Start
         let child = std::process::Command::new(CARGO_BIN)
@@ -736,5 +742,55 @@ mod tests {
         assert!(!Path::new(DEFAULT_NEW_PROCESS_SOCKET).exists());
         assert!(!Path::new(DEFAULT_OLD_PROCESS_SOCKET).exists());
         assert!(!Path::new(DEFAULT_SHARED_MEMORY_FILE).exists());
+    }
+    #[test]
+    // #[sequential]
+    fn server_chain() {
+        const SERVER_BINARY: &str = "/home/jonathan/Projects/rdb-workspace/target/debug/rdb-server";
+
+        let mut process = (0..2).fold(
+            std::process::Command::new("sudo")
+                .args([SERVER_BINARY, "-l", "Info"])
+                .stdout(overwrite("./server_chain_stdout_0.txt").unwrap())
+                .stderr(overwrite("./server_chain_stderr_0.txt").unwrap())
+                .spawn()
+                .unwrap(),
+            |mut predecessor, i| {
+                dbg!(i);
+
+                let successor = std::process::Command::new("sudo")
+                    .args([SERVER_BINARY, "-l", "Info"])
+                    .stdout(overwrite(&format!("./server_chain_stdout_{}.txt", i + 1)).unwrap())
+                    .stderr(overwrite(&format!("./server_chain_stderr_{}.txt", i + 1)).unwrap())
+                    .spawn()
+                    .unwrap();
+                let output = predecessor.wait().unwrap();
+
+                assert!(output.success());
+                // let stdout = std::str::from_utf8(&output.stdout).unwrap();
+                // println!("stdout: \"{}\"",stdout);
+                // let stderr = std::str::from_utf8(&output.stderr).unwrap();
+                // println!("stderr: \"{}\"",stderr);
+                successor
+            },
+        );
+
+        // Interrupt server (`ctrl+c`)
+        unsafe {
+            libc::kill(process.id() as i32, libc::SIGINT);
+        }
+        let output = process.wait().unwrap();
+        assert!(output.success());
+        // let stdout = std::str::from_utf8(&output.stdout).unwrap();
+        // println!("stdout: \"{}\"",stdout);
+        // let stderr = std::str::from_utf8(&output.stderr).unwrap();
+        // println!("stderr: \"{}\"",stderr);
+    }
+    fn overwrite(s: &str) -> std::io::Result<std::fs::File> {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(s)
     }
 }

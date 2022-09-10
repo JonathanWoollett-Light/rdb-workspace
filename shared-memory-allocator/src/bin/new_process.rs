@@ -1,18 +1,20 @@
-use const_format::concatcp;
 use shared_memory_allocator::SharedAllocator;
-const DIR: &str = "/tmp/";
-const TAG: &str = "__rdb_";
-const TEST_FILE_PREFIX: &str = concatcp!(DIR, TAG);
-const SHMID: &str = concatcp!(TEST_FILE_PREFIX, "new_process");
+const NEW_PROCESS_KEY: i32 = 240434;
 fn main() {
-    assert!(std::path::Path::new(SHMID).exists(), "1");
+    assert!(
+        shared_memory_allocator::bindings::shared_memory_allocated(NEW_PROCESS_KEY)
+            .unwrap()
+            .is_some()
+    );
 
     let shared_memory_description_map = SharedAllocator::shared_memory_description_map();
-    assert!(shared_memory_description_map.lock().expect("2").is_empty());
+    assert!(shared_memory_description_map.lock().unwrap().is_empty());
 
-    let allocator = unsafe { SharedAllocator::new_process(SHMID).expect("3") };
-    assert_eq!(shared_memory_description_map.lock().expect("4").len(), 1);
+    let _allocator = SharedAllocator::new_process(NEW_PROCESS_KEY).unwrap();
 
-    drop(allocator);
-    assert!(std::path::Path::new(SHMID).exists(), "5");
+    assert!(
+        shared_memory_allocator::bindings::shared_memory_allocated(NEW_PROCESS_KEY)
+            .unwrap()
+            .is_some()
+    );
 }

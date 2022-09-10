@@ -1,18 +1,29 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-const CARGO_BIN: &str = "/home/jonathan/.cargo/bin/cargo";
+use criterion::{criterion_group, criterion_main, Criterion};
+// const CARGO_BIN: &str = "/home/jonathan/.cargo/bin/cargo";
+// const SERVER_BINARY:&str = "/home/jonathan/Projects/rdb-workspace/target/debug/rdb-server";
 
 pub fn switch_benchmark(c: &mut Criterion) {
-    // let child = std::process::Command::new(CARGO_BIN)
-    //     .args(["run", "--bin", "rbd-server"])
-    //     .spawn()
-    //     .unwrap();
+    //     let mut predecessor = std::process::Command::new("sudo")
+    //         .arg(SERVER_BINARY)
+    //         .spawn()
+    //         .unwrap();
+    //     let mut successor = None;
 
-    // c.bench_function("fib 20", |b| b.iter(|| fibonacci(black_box(20))));
+    //     for
 
-    // // Interrupt server (`ctrl+c`)
-    // unsafe {
-    //     libc::kill(child.id() as i32,libc::SIGINT);
-    // }
+    //     c.bench_function("switching", |b| b.iter(|| {
+    //         successor = Some(std::process::Command::new("sudo")
+    //             .arg(SERVER_BINARY)
+    //             .spawn()
+    //             .unwrap());
+    //         predecessor.wait().unwrap();
+    //         predecessor = successor.take().unwrap();
+    //     }));
+
+    //     // Interrupt server (`ctrl+c`)
+    //     unsafe {
+    //         libc::kill(predecessor.id() as i32,libc::SIGINT);
+    //     }
 }
 
 criterion_group!(benches, switch_benchmark);

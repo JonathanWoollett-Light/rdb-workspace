@@ -107,15 +107,12 @@ pub enum SharedAllocatorNewProcessError {
     /// Failed to acquire lock on shared memory description map.
     #[error("Failed to acquire lock on shared memory description map.")]
     SharedMemoryDescriptionMapLock,
-    /// Failed to open shared memory id file.
-    #[error("Failed to open shared memory id file: {0}")]
-    ShmidFileOpen(std::io::Error),
-    /// Failed to read shared memory id file.
-    #[error("Failed to read shared memory id file: {0}")]
-    ShmidFileRead(std::io::Error),
-    /// Failed to allocate shared memory.
-    #[error("Failed to allocate shared memory: {0}")]
-    Allocate(i32),
+    /// Failed to get shared memory.
+    #[error("Failed to get shared memory: {0}")]
+    Get(i32),
+    /// Shared memory doesn't exist.
+    #[error("Shared memory doesn't exist.")]
+    Nonexistant,
     /// Failed to attach shared memory.
     #[error("Failed to attach shared memory: {0}")]
     Attach(i32),
@@ -147,14 +144,18 @@ pub struct SharedAllocator {
     addr: usize,
 }
 
-impl SharedAllocator {
-    /// Returns the address of the shared memory.
-    #[must_use]
-    #[inline]
-    pub fn address(&self) -> usize {
-        self.addr
-    }
+/// The description of shared memory stored by processes'.
+#[derive(Debug, Clone)]
+pub struct SharedMemoryDescription {
+    /// `shmid` of the shared memory
+    shmid: i32,
+    /// Address the memory is attached to this process
+    addr: usize,
+    /// Number of attached allocators in this process
+    attached: usize,
+}
 
+impl SharedAllocator {
     /// Returns the key of the shared memory.
     #[must_use]
     #[inline]
@@ -162,18 +163,32 @@ impl SharedAllocator {
         self.key
     }
 
+    /// Returns the key of the shared memory.
+    #[must_use]
+    #[inline]
+    pub fn shmid(&self) -> i32 {
+        self.shmid
+    }
+
+    /// Returns the address of the shared memory.
+    #[must_use]
+    #[inline]
+    pub fn address(&self) -> usize {
+        self.addr
+    }
+
     /// Since rust doesn't support static members on structs, we do this.
     #[must_use]
     #[inline]
     #[logfn(Trace)]
-    pub fn shared_memory_description_map() -> Arc<Mutex<HashMap<i32, (i32, usize)>>> {
+    pub fn shared_memory_description_map() -> Arc<Mutex<HashMap<i32, SharedMemoryDescription>>> {
         // Counts instance non-dropped shared allocators in this process pointing to the same shared
         // memory.
         // <key, (shmid, address)>
         /// Static memory holding structures used to store the description of all shared memory
         /// attached to this process.
         static mut SHARED_MEMORY_DESCRIPTION_MAP: MaybeUninit<
-            Arc<Mutex<HashMap<i32, (i32, usize)>>>,
+            Arc<Mutex<HashMap<i32, SharedMemoryDescription>>>,
         > = MaybeUninit::uninit();
         /// Static used to ensure initialization of `SHARED_MEMORY_DESCRIPTION_MAP` once.
         static INIT_SHARED_MEMORY_DESCRIPTION_MAP: std::sync::Once = std::sync::Once::new();
@@ -214,29 +229,43 @@ impl SharedAllocator {
             .lock()
             .map_err(|_| SharedAllocatorNewError::SharedMemoryDescriptionMapLock)?;
 
+        #[allow(clippy::pattern_type_mismatch)]
         // If shared allocator exists in this process for this shared memory
         #[allow(clippy::map_err_ignore)]
-        if let Some(&(shmid, addr)) = guard.get(&key) {
-            Ok(Self { key, shmid, addr })
+        // For `*attached += 1` to fail you would need to have more than usize::MAX (2^32)
+        // allocators alive at a time. We can reasonably presume this will never happen.
+        #[allow(clippy::integer_arithmetic, clippy::arithmetic_side_effects)]
+        if let Some(SharedMemoryDescription {
+            shmid,
+            addr,
+            attached,
+        }) = guard.get_mut(&key)
+        {
+            *attached += 1;
+            Ok(Self {
+                key,
+                shmid: *shmid,
+                addr: *addr,
+            })
         }
         // If this is first shared allocator in this process for this shared memory
         else {
             // Check if this is first allocator for this shared memory
             #[allow(clippy::unwrap_used)]
-            let check = bindings::shared_memory_allocated(key).unwrap();
+            let check = bindings::shared_memory_id(key).unwrap();
 
-            let shmid = match check {
-                Some(shmid) => shmid,
-                // If the shared memory does not exist, this is the first process to use this
-                // shared memory. Thus we must allocate the shared memory.
-                None => {
-                    let full_size = size
-                        .checked_add(std::mem::size_of::<InMemoryDescription>())
-                        .ok_or(SharedAllocatorNewError::TooBig)?;
-                    // Allocate shared memory
-                    bindings::allocate_shared_memory(Some(key), full_size)
-                        .map_err(SharedAllocatorNewError::Allocate)?
-                }
+            let shmid = if let Some(s) = check {
+                s
+            }
+            // If the shared memory does not exist, this is the first process to use this
+            // shared memory. Thus we must allocate the shared memory.
+            else {
+                let full_size = size
+                    .checked_add(std::mem::size_of::<InMemoryDescription>())
+                    .ok_or(SharedAllocatorNewError::TooBig)?;
+                // Allocate shared memory
+                bindings::allocate_shared_memory(Some(key), full_size)
+                    .map_err(SharedAllocatorNewError::Allocate)?
             };
 
             // Attach shared memory
@@ -246,12 +275,15 @@ impl SharedAllocator {
             // If first allocator for this shared memory, create memory description.
             if check.is_none() {
                 // Create in-memory memory description
-                unsafe { std::ptr::write(
+                // SAFETY:
+                // Always safe.
+                unsafe {
+                    std::ptr::write(
                     shared_mem_ptr.cast::<InMemoryDescription>(),
                     InMemoryDescription {
                         length: RwLock::new(0usize),
-                    },
-                ) };
+                    });
+                }
 
                 // Schedule de-allocation of shared memory.
                 //
@@ -266,8 +298,15 @@ impl SharedAllocator {
             }
 
             // Update allocator map and drop guard
-            guard.insert(key, (shmid, shared_mem_ptr.to_bits()));
-            // REturn allocator
+            guard.insert(
+                key,
+                SharedMemoryDescription {
+                    shmid,
+                    addr: shared_mem_ptr.to_bits(),
+                    attached: 1,
+                },
+            );
+            // Return allocator
             Ok(Self {
                 key,
                 shmid,
@@ -317,30 +356,27 @@ impl SharedAllocator {
         info!("shared memory pointer: {:?}", shared_mem_ptr);
 
         // Create in-memory memory description
+        // SAFETY:
+        // Always safe.
         unsafe {
             std::ptr::write(
                 shared_mem_ptr.cast::<InMemoryDescription>(),
                 InMemoryDescription {
                     length: RwLock::new(0usize),
                 },
-            )
+            );
         };
 
         // Update allocator map and drop guard
-        guard.insert(shmid, (shmid, shared_mem_ptr.to_bits()));
+        guard.insert(
+            key,
+            SharedMemoryDescription {
+                shmid,
+                addr: shared_mem_ptr.to_bits(),
+                attached: 1,
+            },
+        );
         trace!("updated allocator map and dropped guard");
-
-        // Schedule de-allocation of shared memory.
-        //
-        // We do this here as the documentation notes:
-        // > Mark the segment to be destroyed. The segment will only actually be destroyed after the
-        // > last process detaches
-        // Thus we can do this immediately after attaching the shared memory to this process.
-        //
-        // SAFETY:
-        // TODO: Write more here.
-        bindings::deallocate_shared_memory(shmid)
-            .map_err(SharedAllocatorNewMemoryError::Deallocate)?;
 
         // Return allocator
         Ok(Self {
@@ -348,12 +384,6 @@ impl SharedAllocator {
             shmid,
             addr: shared_mem_ptr.to_bits(),
         })
-    }
-
-    /// Detaches shared memory referred to by `Self`.
-    #[logfn(Trace)]
-    pub fn detach(self) {
-        bindings::detach_shared_memory(<*mut libc::c_void>::from_bits(self.addr)).unwrap();
     }
 
     /// Constructs a shared memory allocator for existing shared memory (identified by `shmid_path`)
@@ -382,15 +412,23 @@ impl SharedAllocator {
         // Presume not 1st allocator for this shared memory
         debug_assert!(guard.get(&key).is_none());
 
-        let shmid = bindings::shared_memory_allocated(key)
-            .unwrap()
-            .expect("shared memory not allocated");
+        let shmid = bindings::shared_memory_id(key)
+            .map_err(SharedAllocatorNewProcessError::Get)?
+            .ok_or(SharedAllocatorNewProcessError::Nonexistant)?;
+
         // Attach shared memory
         let shared_mem_ptr = bindings::attach_shared_memory(shmid)
             .map_err(SharedAllocatorNewProcessError::Attach)?;
 
         // Update allocator map and drop guard
-        guard.insert(key, (shmid, shared_mem_ptr.to_bits()));
+        guard.insert(
+            key,
+            SharedMemoryDescription {
+                shmid,
+                addr: shared_mem_ptr.to_bits(),
+                attached: 1,
+            },
+        );
         // Return allocator
         Ok(Self {
             key,
@@ -399,13 +437,50 @@ impl SharedAllocator {
         })
     }
 }
-#[cfg(doc)]
 impl Drop for SharedAllocator {
+    #[allow(clippy::unwrap_used)]
     #[logfn(Trace)]
     fn drop(&mut self) {
         // We do not need to detach the shared memory manually as the documentation notes:
         // > Upon _exit(2) all attached shared memory segments are detached from the process.
         // And we want memory to be attached for the whole lifetime of the process.
+        // However unforuntaely since `deallocate` dettaches the memory we need a custom drop so we
+        // deallocate with the last shared allocator.
+
+        let map = Self::shared_memory_description_map();
+        let mut guard = map.lock().unwrap();
+        let entry = guard.get_mut(&self.key).unwrap();
+        #[allow(clippy::pattern_type_mismatch)]
+        let SharedMemoryDescription {
+            shmid,
+            addr,
+            attached,
+        } = entry;
+
+        // `attached` is incremented by 1 when a `SharedAllocator` is created and only decremented
+        // here. Since we match on 1, and don't decrement, `attached` should never be 0.
+        #[allow(
+            clippy::integer_arithmetic,
+            clippy::arithmetic_side_effects,
+            clippy::unreachable
+        )]
+        match *attached {
+            0 => unreachable!(),
+            1 => {
+                let desc = bindings::shared_memory_description(*shmid).unwrap();
+                if desc.shm_nattch == 1 {
+                    bindings::deallocate_shared_memory(*shmid).unwrap();
+                }
+                bindings::detach_shared_memory(<*mut libc::c_void>::from_bits(*addr)).unwrap();
+                // Removes shared memory description from this process
+                let ret = guard.remove(&self.key);
+                debug_assert!(ret.is_some());
+            }
+            _ => {
+                *attached -= 1;
+            }
+        }
+        drop(guard);
     }
 }
 // SAFETY:
@@ -492,6 +567,8 @@ mod tests {
         BASE.fetch_add(1, Ordering::SeqCst)
     }
 
+    const SHARED_MEMORY_SIZE: usize = 1024 * 1024;
+
     // Create link to cargo binary e.g. `sudo ln -s /home/$USER/.cargo/bin/cargo /usr/bin/cargo`
 
     // const KB:usize = 1024;
@@ -508,7 +585,6 @@ mod tests {
             simple_logger::SimpleLogger::new().init().unwrap();
         });
     }
-    const CARGO_BIN: &str = "/home/jonathan/.cargo/bin/cargo";
 
     // We need to run tests sequentially as they rely on checking the shared memory description
     // attached to this process. This description would not have a deterministic state if tests
@@ -524,12 +600,21 @@ mod tests {
         let key = unique_key();
 
         // Check if shared memory allocated under `key`.
-        assert!(bindings::shared_memory_allocated(key).unwrap().is_none());
+        assert!(!bindings::shared_memory_exists(key).unwrap());
 
         let shared_memory_description_map = SharedAllocator::shared_memory_description_map();
         assert!(shared_memory_description_map.lock().unwrap().is_empty());
 
-        let _shared_memory = SharedAllocator::new_memory(key, 1024 * 1024).unwrap();
+        let shared_memory = SharedAllocator::new_memory(key, SHARED_MEMORY_SIZE).unwrap();
+
+        assert_eq!(shared_memory_description_map.lock().unwrap().len(), 1);
+        assert!(bindings::shared_memory_exists(key).unwrap());
+
+        // Deallocates shared memory bound to `shmid`.
+        drop(shared_memory);
+
+        assert!(shared_memory_description_map.lock().unwrap().is_empty());
+        assert!(!bindings::shared_memory_exists(key).unwrap());
     }
     // Tests creating and dropping an allocator with shared memory previously created by a different
     // process.
@@ -538,27 +623,30 @@ mod tests {
     fn new_process() {
         // Init logger
         init_logger();
-        // Test
-        const NEW_PROCESS_KEY: i32 = 240434;
-        assert!(bindings::shared_memory_allocated(NEW_PROCESS_KEY)
-            .unwrap()
-            .is_none());
+
+        let key = unique_key();
+        assert!(!bindings::shared_memory_exists(key).unwrap());
 
         let shared_memory_description_map = SharedAllocator::shared_memory_description_map();
         assert!(shared_memory_description_map.lock().unwrap().is_empty());
 
-        let _shared_memory = SharedAllocator::new_memory(NEW_PROCESS_KEY, 1024 * 1024).unwrap();
-        assert!(bindings::shared_memory_allocated(NEW_PROCESS_KEY)
-            .unwrap()
-            .is_some());
+        let shared_memory = SharedAllocator::new_memory(key, SHARED_MEMORY_SIZE).unwrap();
+
+        assert_eq!(shared_memory_description_map.lock().unwrap().len(), 1);
+        assert!(bindings::shared_memory_exists(key).unwrap());
 
         // Create new process with shared memory allocator point to the same shared memory.
-        let output = std::process::Command::new(CARGO_BIN)
-            .args(["run", "--bin", "new_process"])
+        let output = std::process::Command::new("cargo")
+            .args(["run", "--bin", "new_process", "--", &key.to_string()])
             .output()
             .unwrap();
         // Assert exit okay
         assert_eq!(output.status.code(), Some(0));
+
+        drop(shared_memory);
+
+        assert!(shared_memory_description_map.lock().unwrap().is_empty());
+        assert!(!bindings::shared_memory_exists(key).unwrap());
 
         // Check outputs
         let stdout = std::str::from_utf8(&output.stdout).unwrap();
@@ -566,7 +654,7 @@ mod tests {
         let stderr = std::str::from_utf8(&output.stderr).unwrap();
         println!("stderr: \"\n{}\"", stderr);
     }
-    const SIZE: usize = 1024 * 1024;
+
     #[test]
     #[sequential]
     fn base() {
@@ -575,28 +663,23 @@ mod tests {
 
         let key = unique_key();
 
-        let shmid = bindings::allocate_shared_memory(Some(key), SIZE).unwrap();
-        // let shmid = unsafe {
-        //     let shmid = libc::shmget(KEY, SIZE, libc::IPC_CREAT);
-        //     dbg!(*libc::__errno_location());
-        //     shmid
-        // };
+        assert!(!bindings::shared_memory_exists(key).unwrap());
+
+        let shmid = bindings::allocate_shared_memory(Some(key), SHARED_MEMORY_SIZE).unwrap();
 
         let description = bindings::shared_memory_description(shmid).unwrap();
-        // let description = unsafe {
-        //     let mut description: MaybeUninit<libc::shmid_ds> = MaybeUninit::uninit();
-        //     let result = libc::shmctl(shmid, libc::IPC_STAT, description.as_mut_ptr());
-        //     dbg!(result);
-        //     dbg!(*libc::__errno_location());
-        //     description.assume_init_read();
-        // };
         assert_eq!(description.shm_perm.__key, key);
-        assert_eq!(description.shm_segsz, SIZE);
+        assert_eq!(description.shm_segsz, SHARED_MEMORY_SIZE);
 
         let ptr = bindings::attach_shared_memory(shmid).unwrap();
+
+        assert!(bindings::shared_memory_exists(key).unwrap());
+
         bindings::detach_shared_memory(ptr).unwrap();
 
         bindings::deallocate_shared_memory(shmid).unwrap();
+
+        assert!(!bindings::shared_memory_exists(key).unwrap());
     }
     #[test]
     #[sequential]
@@ -605,20 +688,21 @@ mod tests {
         init_logger();
 
         let key = unique_key();
+        dbg!(key);
 
         // Check if shared memory allocated under `key`.
-        assert!(bindings::shared_memory_allocated(key).unwrap().is_none());
+        assert!(!bindings::shared_memory_exists(key).unwrap());
 
         // Allocates shared memory under `key`.
-        let shmid = bindings::allocate_shared_memory(Some(key), SIZE).unwrap();
+        let shmid = bindings::allocate_shared_memory(Some(key), SHARED_MEMORY_SIZE).unwrap();
 
         // Check if shared memory allocated under `key`.
-        assert!(bindings::shared_memory_allocated(key).unwrap().is_some());
+        assert!(bindings::shared_memory_exists(key).unwrap());
 
         // Deallocates shared memory bound to `shmid`.
         bindings::deallocate_shared_memory(shmid).unwrap();
 
         // Check if shared memory allocated under `key`.
-        assert!(bindings::shared_memory_allocated(key).unwrap().is_none());
+        assert!(!bindings::shared_memory_exists(key).unwrap());
     }
 }

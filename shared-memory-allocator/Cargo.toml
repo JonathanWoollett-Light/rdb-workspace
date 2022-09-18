@@ -21,4 +21,4 @@ log-derive = "0.4.1"
 
 [dev-dependencies]
 simple_logger = "2.3.0"
-sequential-test = "0.1.4"
+sequential-test = "0.2.4"

@@ -8,13 +8,18 @@ use std::mem::MaybeUninit;
 use log::trace;
 use log_derive::{logfn, logfn_inputs};
 
+/// Returns capacity of shared memory.
 pub fn shared_memory_capacity(shmid: i32) -> Result<usize, i32> {
     shared_memory_description(shmid).map(|x| x.shm_segsz)
 }
 
-/// Returns some `shmid` for a given `key` is the shared memory is allocated, otherwise returns
-/// none.
-pub fn shared_memory_allocated(key: i32) -> Result<Option<i32>, i32> {
+/// Returns whether the shared memory with a given key exists.
+pub fn shared_memory_exists(key: i32) -> Result<bool, i32> {
+    shared_memory_id(key).map(|x| x.is_some())
+}
+
+/// Returns the shared memory id for a given key.
+pub fn shared_memory_id(key: i32) -> Result<Option<i32>, i32> {
     let res = unsafe { libc::shmget(key, Default::default(), libc::IPC_EXCL) };
     let errno = errno();
     trace!("res: {}", res);
@@ -23,11 +28,6 @@ pub fn shared_memory_allocated(key: i32) -> Result<Option<i32>, i32> {
         (-1i32, libc::ENOENT) => Ok(None),
         (-1i32, _) => Err(errno),
         (res, _) => Ok(Some(res)),
-        // The documentation specifies:
-        // > A valid segment identifier, shmid, is returned on success, -1 on error.
-        // Therefore this is safe.
-        #[allow(clippy::unreachable)]
-        _ => unreachable!(),
     }
 }
 /// Allocate shared memory.
@@ -36,13 +36,14 @@ pub fn shared_memory_allocated(key: i32) -> Result<Option<i32>, i32> {
 #[logfn(Trace)]
 #[logfn_inputs(Trace)]
 pub fn allocate_shared_memory(key: Option<i32>, size: usize) -> Result<i32, i32> {
-    debug_assert!(key != Some(libc::IPC_PRIVATE));
+    #[allow(clippy::cast_possible_wrap)]
     const PERMISSIONS: i32 = (libc::S_IRGRP
         | libc::S_IROTH
         | libc::S_IRUSR
         | libc::S_IWGRP
         | libc::S_IWOTH
         | libc::S_IWUSR) as i32;
+    debug_assert!(key != Some(libc::IPC_PRIVATE));
     let allocated_shmid = unsafe {
         libc::shmget(
             key.unwrap_or(libc::IPC_PRIVATE),

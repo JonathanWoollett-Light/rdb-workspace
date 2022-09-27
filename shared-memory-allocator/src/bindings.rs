@@ -118,10 +118,10 @@ pub fn deallocate_shared_memory(shmid: i32) -> Result<(), i32> {
         0i32 => Ok(()),
         -1i32 => Err(errno()),
         // The documentation specifies:
-        // > A successful IPC_INFO or SHM_INFO operation returns the index of the highest used 
+        // > A successful IPC_INFO or SHM_INFO operation returns the index of the highest used
         // > entry in the kernel's internal array recording information about all shared memory segments.
         // > ...
-        // > A successful SHM_STAT operation returns the identifier of the shared memory segment 
+        // > A successful SHM_STAT operation returns the identifier of the shared memory segment
         // > whose index was given in shmid. Other operations return 0 on success.
         // > On error, -1 is returned, and errno is set appropriately.
         // Therefore this is safe.

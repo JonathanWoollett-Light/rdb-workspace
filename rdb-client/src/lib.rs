@@ -23,8 +23,6 @@ use log::trace;
 use log_derive::logfn;
 use serde::Serialize;
 
-/// Sever address.
-const ADDRESS: &str = "127.0.0.1:8080";
 /// We allow the client to hang for up to 100ms awaiting the server transfer process.
 ///
 /// The vast majority of transfers are <1ms, this is just very cautious.
@@ -67,6 +65,7 @@ type SetReturn = Result<(), ()>;
 /// Result of user defined `sum` query.
 type SumReturn = Result<u16, ()>;
 /// Client.
+#[derive(Debug)]
 pub struct Client(TcpStream);
 impl Client {
     /// Creates new client.
@@ -74,18 +73,20 @@ impl Client {
     /// # Errors
     ///
     /// When failing to connection to server `TcpStream`.
+    #[logfn(Trace)]
     pub fn new(address: impl std::net::ToSocketAddrs) -> Result<Self, std::io::Error> {
         Ok(Self(TcpStream::connect(address)?))
     }
 
     /// Re-connects to server stream.
+    #[logfn(Trace)]
     fn reconnect(&mut self) -> Result<(), std::io::Error> {
         // Wait for server transfer to complete
         std::thread::sleep(Duration::from_millis(SERVER_TRANSFER_TIMEOUT));
         // TODO Can we use `TcpStream::connect_SERVER_TRANSFER_TIMEOUT` here so we don't always
         // need to wait full time?
         // Re-connect to stream
-        self.0 = TcpStream::connect(&ADDRESS)?;
+        self.0 = TcpStream::connect(self.0.local_addr()?)?;
         Ok(())
     }
 
@@ -194,9 +195,10 @@ pub enum ReadFrameError {
     ReadData(std::io::Error),
 }
 /// Reads frame from stream.
+#[logfn(Trace)]
 fn read_frame(stream: &mut TcpStream) -> Result<Vec<u8>, ReadFrameError> {
     // A frame consists of:
-    // 1. A number defining the length of the input bytes (usize).
+    // 1. A number defining the length of the data (including itself).
     // 2. The bytes (Vec<u8>).
     /// Size of length description of frame.
     const S: usize = size_of::<usize>();
@@ -224,6 +226,7 @@ fn read_frame(stream: &mut TcpStream) -> Result<Vec<u8>, ReadFrameError> {
     // Always safe,
     let length_arr = unsafe { bytes.get_unchecked(0..S).try_into().unwrap_unchecked() };
     let bytes_length = usize::from_ne_bytes(length_arr);
+    trace!("bytes_length: {bytes_length}");
 
     // Read input data bytes
     let data_length = match bytes_length {
@@ -233,6 +236,8 @@ fn read_frame(stream: &mut TcpStream) -> Result<Vec<u8>, ReadFrameError> {
         // We know `input_length >= S` thus `input_length - S` is always valid.
         S.. => unsafe { bytes_length.unchecked_sub(S) },
     };
+    trace!("data_length: {data_length}");
+
     // We size `data_bytes` to exactly `data_length` so we only read this frame, and not into the
     // next one.
     let mut data_bytes = vec![Default::default(); data_length];
@@ -272,6 +277,7 @@ pub enum WriteFrameError {
 }
 
 /// Writes frame to stream
+#[logfn(Trace)]
 fn write_frame(
     stream: &mut TcpStream,
     function_index: usize,
@@ -283,7 +289,15 @@ fn write_frame(
     let serialized = serde_json::to_vec(&input)?;
 
     trace!("serialized: {:?}", &serialized);
-    let mut write_bytes = Vec::from(serialized.len().to_ne_bytes());
+
+    // SAFETY:
+    // For `size_of::<usize>().checked_add(serialized.len()).is_err()` to be
+    // true `serialized.len()` would need to be greater than `2^64 - 4`.
+    // We can reasonably presume this will only occur in circumstance such as
+    // memory corruption where it is impossible to guard against these errors.
+    // As such it is reasonable and safe to do an unchecked addition here.
+    let len = unsafe { size_of::<usize>().unchecked_add(serialized.len()) };
+    let mut write_bytes = Vec::from(len.to_ne_bytes());
     write_bytes.extend(function_index.to_ne_bytes());
     write_bytes.extend(serialized);
     trace!("write_bytes: {:?}", &write_bytes);
@@ -300,12 +314,32 @@ mod tests {
     use rand::Rng;
 
     use super::*;
+
+    /// Sever address.
+    const ADDRESS: &str = "127.0.0.1:8080";
+
+    static INIT_LOGGER: std::sync::Once = std::sync::Once::new();
+    fn init_logger() {
+        INIT_LOGGER.call_once(|| simple_logger::init_with_level(log::Level::Trace).unwrap());
+    }
+
+    #[test]
+    fn test_get() {
+        init_logger();
+        let mut client = Client::new(ADDRESS).unwrap();
+        let result = client.get(());
+        dbg!(&result);
+        assert!(matches!(result, Ok(Ok(12))));
+        // std::thread::sleep(Duration::from_secs(3));
+    }
+    #[test]
     fn main() {
+        init_logger();
+
         const REQUESTS_RANGE: std::ops::Range<u64> = 5_000_000..10_000_000;
         const CLIENTS: usize = 6;
 
         let now = Instant::now();
-        simple_logger::init_with_level(log::Level::Warn).unwrap();
         dbg!("started");
 
         let multi_bar = indicatif::MultiProgress::new();

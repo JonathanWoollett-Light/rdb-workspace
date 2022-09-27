@@ -279,10 +279,11 @@ impl SharedAllocator {
                 // Always safe.
                 unsafe {
                     std::ptr::write(
-                    shared_mem_ptr.cast::<InMemoryDescription>(),
-                    InMemoryDescription {
-                        length: RwLock::new(0usize),
-                    });
+                        shared_mem_ptr.cast::<InMemoryDescription>(),
+                        InMemoryDescription {
+                            length: RwLock::new(0usize),
+                        },
+                    );
                 }
 
                 // Schedule de-allocation of shared memory.
@@ -294,7 +295,8 @@ impl SharedAllocator {
                 //
                 // SAFETY:
                 // TODO: Write more here.
-                bindings::deallocate_shared_memory(shmid).map_err(SharedAllocatorNewError::Deallocate)?;
+                bindings::deallocate_shared_memory(shmid)
+                    .map_err(SharedAllocatorNewError::Deallocate)?;
             }
 
             // Update allocator map and drop guard
@@ -438,7 +440,7 @@ impl SharedAllocator {
     }
 }
 impl Drop for SharedAllocator {
-    #[allow(clippy::unwrap_used)]
+    #[allow(clippy::unwrap_used, clippy::pattern_type_mismatch)]
     #[logfn(Trace)]
     fn drop(&mut self) {
         // We do not need to detach the shared memory manually as the documentation notes:
@@ -450,7 +452,6 @@ impl Drop for SharedAllocator {
         let map = Self::shared_memory_description_map();
         let mut guard = map.lock().unwrap();
         let entry = guard.get_mut(&self.key).unwrap();
-        #[allow(clippy::pattern_type_mismatch)]
         let SharedMemoryDescription {
             shmid,
             addr,

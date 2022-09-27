@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use log::{info, trace, SetLoggerError};
+use log_derive::logfn;
 use serde::{Deserialize, Serialize};
 use shared_memory_allocator::{
     SharedAllocator, SharedAllocatorNewMemoryError, SharedAllocatorNewProcessError,
@@ -61,7 +62,7 @@ struct Args {
     #[clap(short, long, value_parser, default_value = DEFAULT_NEW_PROCESS_SOCKET)]
     new_process_socket: String,
     /// Log level
-    #[clap(short,long,value_parser,default_value_t = log::Level::Info)]
+    #[clap(short,long,value_parser,default_value_t = log::Level::Trace)]
     log_level: log::Level,
     /// File used to synchronize the shared memory id.
     #[clap(short, long, value_parser, default_value_t = DEFAULT_SHARED_MEMORY_ID)]
@@ -71,7 +72,7 @@ struct Args {
 /// The data type storing `OldData`.
 type OldStore = RwLock<OldData>;
 /// The data in our database of the predecessor process.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 #[repr(C)]
 struct OldData {
     /// `x`
@@ -86,7 +87,7 @@ impl From<OldData> for Data {
 /// The data type storing `Data`.
 type Store = RwLock<Data>;
 /// The data in our database.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 #[repr(C)]
 struct Data {
     /// `x`
@@ -95,17 +96,20 @@ struct Data {
 #[allow(clippy::unnecessary_wraps)]
 impl Data {
     /// Gets `x` in our database.
+    #[logfn(Trace)]
     fn get(&self, _: ()) -> Result<u16, ()> {
         Ok(self.x)
     }
 
     /// Sets `x` in our database.
+    #[logfn(Trace)]
     fn set(&mut self, x: u16) -> Result<(), ()> {
         self.x = x;
         Ok(())
     }
 
     /// Sums `set` then multiplies it by `x` in our database.
+    #[logfn(Trace)]
     fn sum(&self, set: Vec<u16>) -> Result<u16, ()> {
         set.into_iter().sum::<u16>().checked_mul(self.x).ok_or(())
     }
@@ -136,6 +140,7 @@ enum FunctionMapError {
 }
 
 /// Given function index `function_index` and input `input`
+#[logfn(Trace)]
 fn function_map(
     function_index: usize,
     serialized_input: &[u8],
@@ -161,7 +166,6 @@ fn function_map(
                 .read()
                 .map_err(|_| FunctionMapError::ReadLock)?
                 .get(input);
-            trace!("output: {:?}", output);
             write_frame(stream, output)?;
         }
         1 => {
@@ -176,7 +180,6 @@ fn function_map(
                 .write()
                 .map_err(|_| FunctionMapError::WriteLock)?
                 .set(input);
-            trace!("output: {:?}", output);
             write_frame(stream, output)?;
         }
         2 => {
@@ -190,7 +193,6 @@ fn function_map(
                 .read()
                 .map_err(|_| FunctionMapError::ReadLock)?
                 .sum(input);
-            trace!("output: {:?}", output);
             write_frame(stream, output)?;
         }
         _ => return Err(FunctionMapError::InvalidFunctionIndex),
@@ -213,13 +215,21 @@ enum WriteFrameError {
 }
 
 /// Writes frame to stream
+#[logfn(Trace)]
 fn write_frame(stream: &mut TcpStream, input: impl Serialize) -> Result<(), WriteFrameError> {
     #[cfg(feature = "bincode")]
     let serialized = bincode::serialize(&input)?;
     #[cfg(feature = "json")]
     let serialized = serde_json::to_vec(&input)?;
 
-    let mut write_bytes = Vec::from(serialized.len().to_ne_bytes());
+    // SAFETY:
+    // For `size_of::<usize>().checked_add(serialized.len()).is_err()` to be
+    // true `serialized.len()` would need to be greater than `2^64 - 4`.
+    // We can reasonably presume this will only occur in circumstance such as
+    // memory corruption where it is impossible to guard against these errors.
+    // As such it is reasonable and safe to do an unchecked addition here.
+    let len = unsafe { size_of::<usize>().unchecked_add(serialized.len()) };
+    let mut write_bytes = Vec::from(len.to_ne_bytes());
     write_bytes.extend(serialized);
     stream
         .write_all(&write_bytes)
@@ -228,8 +238,12 @@ fn write_frame(stream: &mut TcpStream, input: impl Serialize) -> Result<(), Writ
 /// Error type for [`read_frame`].
 #[derive(Debug, thiserror::Error)]
 enum ReadFrameError {
+    /// Failed to read full frame from client due to blocking first read. This
+    /// like [`std::io::ErrorKind::WouldBlock`] does not indicate an error in the typical sense.
+    #[error("Failed to read full frame from client due to blocking first read.")]
+    WouldBlock,
     /// Failed to read full frame from client within `timeout` `Duration`.
-    #[error("Failed to read full frame from client within `timeout` `Duration`.")]
+    #[error("Failed to read full frame from client within `timeout` duration.")]
     Timeout,
     /// Failed to read full frame from client as stream ended.
     #[error("Failed to read full frame from client as stream ended.")]
@@ -252,13 +266,16 @@ enum ReadFrameError {
 /// the transfer process, we have a timeout to `read_frame`.
 ///
 /// Presumes stream has been previously set as non-blocking
+// We do not trace `read_frame` since it is non-blocking and may return thousands of
+// `ReadFrameError::WouldBlock` in a loop.
+#[logfn(Trace)]
 fn read_frame(
     stream: &mut TcpStream,
     timeout: Duration,
 ) -> Result<(usize, Vec<u8>), ReadFrameError> {
     // A frame consists of:
-    // 1. A number defining the length of the input bytes (usize).
-    // 2. A function number (usize).
+    // 1. A number defining the full length of the data recieved (size of function number plus
+    // length input bytes). 2. A function number (usize).
     // 3. The input bytes (Vec<u8>).
 
     /// Size of length description of frame.
@@ -266,10 +283,12 @@ fn read_frame(
     /// Size of length description of frame and function index.
     #[allow(clippy::undocumented_unsafe_blocks)]
     const L: usize = unsafe { 2usize.unchecked_mul(S) };
+
     let mut bytes = vec![Default::default(); L];
     let mut i = 0;
 
     let start = Instant::now();
+
     // While we haven't received the number defining the length of the input bytes and the function
     // index.
     // Equivalent to `i < L`
@@ -279,12 +298,20 @@ fn read_frame(
         // always valid.
         let slice = unsafe { bytes.get_unchecked_mut(i..) };
         match stream.read(slice) {
+            Ok(0) => return Err(ReadFrameError::EndOfStream),
             Ok(size) => {
                 // SAFETY:
                 // `size` will never be greater than `L`, thus this is always safe.
                 i = unsafe { i.unchecked_add(size) };
             }
-            Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+            // On the first read if it would block we return the result that this function would
+            // block. After the first read we have committed to reading a frame
+            // thereafter a timeout error can
+            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                if i == 0 {
+                    return Err(ReadFrameError::WouldBlock);
+                }
+            }
             Err(err) => return Err(ReadFrameError::ReadLength(err)),
         }
         if start.elapsed() > timeout {
@@ -295,15 +322,17 @@ fn read_frame(
     // Always safe,
     let length_arr = unsafe { bytes.get_unchecked(0..S).try_into().unwrap_unchecked() };
     let input_length = usize::from_ne_bytes(length_arr);
+    trace!("input_length: {input_length}");
 
     // Read input data bytes
     let data_length = match input_length {
-        0 => return Err(ReadFrameError::EndOfStream),
-        1..S => return Err(ReadFrameError::InvalidLength),
+        0..S => return Err(ReadFrameError::InvalidLength),
         // SAFETY:
         // We know `input_length >= S` thus `input_length - S` is always valid.
         S.. => unsafe { input_length.unchecked_sub(S) },
     };
+    trace!("data_length: {data_length}");
+
     // We size `data_bytes` to exactly `data_length` so we only read this frame, and not into the
     // next one.
     let mut data_bytes = vec![Default::default(); data_length];
@@ -333,6 +362,8 @@ fn read_frame(
     let function_index_arr = unsafe { bytes.get_unchecked(S..L).try_into().unwrap_unchecked() };
     // Returns function index and input data bytes
     let function_index = usize::from_ne_bytes(function_index_arr);
+    trace!("function_index: {function_index}");
+
     Ok((function_index, data_bytes))
 }
 
@@ -352,6 +383,7 @@ enum HandleStreamError {
 /// Returns when:
 /// - Client stream is shutdown.
 /// - Server set shutdown notification.
+#[logfn(Trace)]
 fn handle_stream(mut stream: TcpStream) -> Result<(), HandleStreamError> {
     // TODO Check `server_socket` is blocking
     stream
@@ -362,21 +394,20 @@ fn handle_stream(mut stream: TcpStream) -> Result<(), HandleStreamError> {
         match read_frame(&mut stream, Duration::SECOND) {
             // Next value
             Ok((function_index, input)) => {
-                // Presume error as result of client disconnection
+                // TODO: We presume an error here is a result of client
+                // disconnection. This is not entirely logical, we need to fix
+                // this.
                 if let Err(err) = function_map(function_index, &input, &mut stream) {
-                    // TODO Restrict this to specific `.kind()`
-                    info!("write err: {:?}", err);
+                    info!("client disconnected: {err:?}");
                     return Ok(());
                 }
             }
             // End of stream
             Err(ReadFrameError::EndOfStream) => {
+                info!("client disconnected: {:?}", ReadFrameError::EndOfStream);
                 return Ok(());
             }
-            // When client does not write a full frame to the stream within the timeout duration.
-            // TODO: At the moment we handle this the same as if the client stream has shutdown, we
-            // should handle this differently.
-            Err(ReadFrameError::Timeout) => return Ok(()),
+            Err(ReadFrameError::WouldBlock) => (),
             Err(err) => return Err(HandleStreamError::FrameRead(err)),
         }
         // When exit signal set true
@@ -432,6 +463,7 @@ enum ProcessError {
 }
 
 /// Runs server process
+#[logfn(Trace)]
 fn process(
     process_start: Instant,
     old_process_socket: &str,
@@ -528,6 +560,12 @@ fn process(
     // must be able to create and use this datagram for when it must transition.
     // Or on `SIGINT` we want to clean up and gracefully exit.
     std::fs::remove_file(old_process_socket).map_err(ProcessError::RemoveOldProcessDatagram)?;
+    // Drops the shared memory allocator
+    // SAFETY:
+    // `ALLOCATOR` will always be initialized before this. So this is safe.
+    unsafe {
+        ALLOCATOR.assume_init_drop();
+    }
     Ok(())
 }
 
@@ -617,12 +655,8 @@ fn main() -> Result<(), MainError> {
         info!("received offset: {offset}");
 
         // Gets data
-        // SAFETY:
-        // At the moment this is not safe, further work is required here.
-        let allocator = unsafe {
-            SharedAllocator::new_process(args.shared_memory_id)
-                .map_err(MainError::NewProcessAllocator)?
-        };
+        let allocator = SharedAllocator::new_process(args.shared_memory_id)
+            .map_err(MainError::NewProcessAllocator)?;
         info!("allocator.address(): {}", allocator.address());
         let ptr = <*mut u8>::from_bits(
             allocator
@@ -683,12 +717,8 @@ fn main() -> Result<(), MainError> {
         )?;
     } else {
         info!("first");
-        // SAFETY:
-        // At the moment this is not safe, further work is required here.
-        let allocator = unsafe {
-            SharedAllocator::new_memory(args.shared_memory_id, GB)
-                .map_err(MainError::NewMemoryAllocator)?
-        };
+        let allocator = SharedAllocator::new_memory(args.shared_memory_id, GB)
+            .map_err(MainError::NewMemoryAllocator)?;
         let ptr = <*mut u8>::from_bits(allocator.address());
         #[allow(clippy::cast_ptr_alignment)]
         let data_ptr = ptr.cast::<Store>();
@@ -714,6 +744,7 @@ fn main() -> Result<(), MainError> {
     }
     Ok(())
 }
+
 #[cfg(test)]
 mod tests {
     use super::{

@@ -563,7 +563,7 @@ mod tests {
     use super::*;
 
     fn unique_key() -> i32 {
-        const BASE_KEY: i32 = 453845;
+        const BASE_KEY: i32 = 453_845i32;
         static BASE: AtomicI32 = AtomicI32::new(BASE_KEY);
         BASE.fetch_add(1, Ordering::SeqCst)
     }
@@ -583,6 +583,7 @@ mod tests {
     static INIT_LOGGER: std::sync::Once = std::sync::Once::new();
     fn init_logger() {
         INIT_LOGGER.call_once(|| {
+            #[allow(clippy::unwrap_used)]
             simple_logger::SimpleLogger::new().init().unwrap();
         });
     }

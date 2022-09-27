@@ -747,39 +747,51 @@ fn main() -> Result<(), MainError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DEFAULT_NEW_PROCESS_SOCKET, DEFAULT_OLD_PROCESS_SOCKET, DEFAULT_SHARED_MEMORY_FILE,
-    };
+    use super::{DEFAULT_NEW_PROCESS_SOCKET, DEFAULT_OLD_PROCESS_SOCKET};
     const CARGO_BIN: &str = "/home/jonathan/.cargo/bin/cargo";
     use std::path::Path;
     // use sequential_test::sequential;
 
     #[test]
     // #[sequential]
-    fn graceful_interrupt() {
+    fn interrupt() {
         // Start
+        #[allow(clippy::unwrap_used)]
         let child = std::process::Command::new(CARGO_BIN)
             .arg("run")
             .spawn()
             .unwrap();
 
-        // Stop
+        // Interrupt server (`ctrl+c`)
+        // SAFETY:
+        // This call should always be safe.
         unsafe {
-            // Interrupt server (`ctrl+c`)
-            libc::kill(child.id() as i32, libc::SIGINT);
+            #[allow(clippy::unwrap_used)]
+            let pid = i32::try_from(child.id()).unwrap();
+            libc::kill(pid, libc::SIGINT);
         }
 
         // Check cleanup
         assert!(!Path::new(DEFAULT_NEW_PROCESS_SOCKET).exists());
         assert!(!Path::new(DEFAULT_OLD_PROCESS_SOCKET).exists());
-        assert!(!Path::new(DEFAULT_SHARED_MEMORY_FILE).exists());
     }
     #[test]
     // #[sequential]
     fn server_chain() {
-        const SERVER_BINARY: &str = "/home/jonathan/Projects/rdb-workspace/target/debug/rdb-server";
+        fn overwrite(s: &str) -> std::io::Result<std::fs::File> {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(s)
+        }
 
-        let mut process = (0..2).fold(
+        const SERVER_BINARY: &str = "/home/jonathan/Projects/rdb-workspace/target/debug/rdb-server";
+        let max: i32 = 2i32;
+        assert!(max < i32::MAX);
+
+        #[allow(clippy::unwrap_used)]
+        let mut process = (0i32..max).fold(
             std::process::Command::new("sudo")
                 .args([SERVER_BINARY, "-l", "Info"])
                 .stdout(overwrite("./server_chain_stdout_0.txt").unwrap())
@@ -787,17 +799,19 @@ mod tests {
                 .spawn()
                 .unwrap(),
             |mut predecessor, i| {
-                dbg!(i);
-
+                // SAFETY:
+                // Since we previously assert `max < i32::MAX` this will always
+                // be safe.
+                let j = unsafe { i.unchecked_add(1) };
                 let successor = std::process::Command::new("sudo")
                     .args([SERVER_BINARY, "-l", "Info"])
-                    .stdout(overwrite(&format!("./server_chain_stdout_{}.txt", i + 1)).unwrap())
-                    .stderr(overwrite(&format!("./server_chain_stderr_{}.txt", i + 1)).unwrap())
+                    .stdout(overwrite(&format!("./server_chain_stdout_{j}.txt")).unwrap())
+                    .stderr(overwrite(&format!("./server_chain_stderr_{j}.txt")).unwrap())
                     .spawn()
                     .unwrap();
-                let output = predecessor.wait().unwrap();
 
-                assert!(output.success());
+                assert!(matches!(predecessor.wait(),Ok(ok) if ok.success()));
+
                 // let stdout = std::str::from_utf8(&output.stdout).unwrap();
                 // println!("stdout: \"{}\"",stdout);
                 // let stderr = std::str::from_utf8(&output.stderr).unwrap();
@@ -807,21 +821,18 @@ mod tests {
         );
 
         // Interrupt server (`ctrl+c`)
+        // SAFETY:
+        // This call should always be safe.
         unsafe {
-            libc::kill(process.id() as i32, libc::SIGINT);
+            #[allow(clippy::unwrap_used)]
+            let pid = i32::try_from(process.id()).unwrap();
+            libc::kill(pid, libc::SIGINT);
         }
-        let output = process.wait().unwrap();
-        assert!(output.success());
+        assert!(matches!(process.wait(), Ok(ok) if ok.success()));
+
         // let stdout = std::str::from_utf8(&output.stdout).unwrap();
         // println!("stdout: \"{}\"",stdout);
         // let stderr = std::str::from_utf8(&output.stderr).unwrap();
         // println!("stderr: \"{}\"",stderr);
-    }
-    fn overwrite(s: &str) -> std::io::Result<std::fs::File> {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(s)
     }
 }

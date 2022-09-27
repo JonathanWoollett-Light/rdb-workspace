@@ -306,6 +306,7 @@ fn write_frame(
         .map_err(WriteFrameError::Write)
 }
 
+#[allow(clippy::unwrap_used, clippy::dbg_macro, clippy::unreachable)]
 #[cfg(test)]
 mod tests {
     use std::time::Instant;
@@ -334,10 +335,10 @@ mod tests {
     }
     #[test]
     fn main() {
-        init_logger();
-
         const REQUESTS_RANGE: std::ops::Range<u64> = 5_000_000..10_000_000;
         const CLIENTS: usize = 6;
+
+        init_logger();
 
         let now = Instant::now();
         dbg!("started");
@@ -365,8 +366,7 @@ mod tests {
         for _ in 0..requests {
             // Picks random query
             let x: usize = rng.gen_range(0..3);
-            #[cfg(debug_assertions)]
-            dbg!("x: {}", x);
+            dbg!(x);
 
             let function_result = match x {
                 0 => client.get(()).is_ok(),

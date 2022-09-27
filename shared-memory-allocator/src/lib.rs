@@ -112,7 +112,7 @@ pub enum SharedAllocatorNewProcessError {
     Get(i32),
     /// Shared memory doesn't exist.
     #[error("Shared memory doesn't exist.")]
-    Nonexistant,
+    Nonexistent,
     /// Failed to attach shared memory.
     #[error("Failed to attach shared memory: {0}")]
     Attach(i32),
@@ -416,7 +416,7 @@ impl SharedAllocator {
 
         let shmid = bindings::shared_memory_id(key)
             .map_err(SharedAllocatorNewProcessError::Get)?
-            .ok_or(SharedAllocatorNewProcessError::Nonexistant)?;
+            .ok_or(SharedAllocatorNewProcessError::Nonexistent)?;
 
         // Attach shared memory
         let shared_mem_ptr = bindings::attach_shared_memory(shmid)
@@ -446,7 +446,7 @@ impl Drop for SharedAllocator {
         // We do not need to detach the shared memory manually as the documentation notes:
         // > Upon _exit(2) all attached shared memory segments are detached from the process.
         // And we want memory to be attached for the whole lifetime of the process.
-        // However unforuntaely since `deallocate` dettaches the memory we need a custom drop so we
+        // However unfortunately since `deallocate` detaches the memory we need a custom drop so we
         // deallocate with the last shared allocator.
 
         let map = Self::shared_memory_description_map();

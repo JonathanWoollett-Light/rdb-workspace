@@ -274,7 +274,7 @@ fn read_frame(
     timeout: Duration,
 ) -> Result<(usize, Vec<u8>), ReadFrameError> {
     // A frame consists of:
-    // 1. A number defining the full length of the data recieved (size of function number plus
+    // 1. A number defining the full length of the data received (size of function number plus
     // length input bytes). 2. A function number (usize).
     // 3. The input bytes (Vec<u8>).
 

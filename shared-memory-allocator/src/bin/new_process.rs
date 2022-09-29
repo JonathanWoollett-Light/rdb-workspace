@@ -2,6 +2,7 @@ use shared_memory_allocator::bindings::shared_memory_exists;
 use shared_memory_allocator::SharedAllocator;
 
 fn main() {
+    // Get key from command line arguments
     let arg = std::env::args().nth(1);
     dbg!(&arg);
     let key_str = arg.unwrap();
@@ -9,18 +10,33 @@ fn main() {
     let key = key_str.parse::<i32>().unwrap();
     dbg!(key);
 
-    assert!(shared_memory_exists(key).unwrap());
+    let shared_memory_description_map = SharedAllocator::shared_memory_description_map();
 
-    let smd_map = SharedAllocator::shared_memory_description_map();
-    assert!(smd_map.lock().unwrap().is_empty());
+    // Check memory exists
+    assert!(shared_memory_exists(key).unwrap());
+    // Check memory not attached
+    assert!(!shared_memory_description_map
+        .lock()
+        .unwrap()
+        .contains_key(&key));
 
     let allocator = SharedAllocator::new_process(key).unwrap();
 
-    assert_eq!(smd_map.lock().unwrap().len(), 1);
+    // Check memory exists
     assert!(shared_memory_exists(key).unwrap());
+    // Check memory attached
+    assert!(shared_memory_description_map
+        .lock()
+        .unwrap()
+        .contains_key(&key));
 
     drop(allocator);
 
-    assert!(smd_map.lock().unwrap().is_empty());
+    // Check memory exists
     assert!(shared_memory_exists(key).unwrap());
+    // Check memory not attached
+    assert!(!shared_memory_description_map
+        .lock()
+        .unwrap()
+        .contains_key(&key));
 }

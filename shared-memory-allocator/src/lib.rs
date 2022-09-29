@@ -18,7 +18,7 @@
 //! An extremely unsafe experiment in writing a custom allocator to use linux shared memory.
 
 use std::alloc::{AllocError, Layout};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex};
@@ -452,6 +452,7 @@ impl Drop for SharedAllocator {
         let map = Self::shared_memory_description_map();
         let mut guard = map.lock().unwrap();
         let entry = guard.get_mut(&self.key).unwrap();
+        trace!("entry: {entry:?}");
         let SharedMemoryDescription {
             shmid,
             addr,
@@ -469,6 +470,7 @@ impl Drop for SharedAllocator {
             0 => unreachable!(),
             1 => {
                 let desc = bindings::shared_memory_description(*shmid).unwrap();
+                trace!("desc: {desc:?}");
                 if desc.shm_nattch == 1 {
                     bindings::deallocate_shared_memory(*shmid).unwrap();
                 }
@@ -553,21 +555,66 @@ unsafe impl std::alloc::Allocator for SharedAllocator {
     }
 }
 
+/// Gets all currently used keys for shared memory.
+pub fn used_keys() -> HashSet<i32> {
+    let output = std::process::Command::new("ipcs").output().unwrap();
+    let output_string = std::str::from_utf8(&output.stdout).unwrap();
+    let mut line_iter = output_string.split("\n");
+
+    while let Some(line) = line_iter.next() {
+        if line == "------ Shared Memory Segments --------" {
+            assert_eq!(
+                line_iter.next(),
+                Some(
+                    "key        shmid      owner      perms      bytes      nattch     status     \
+                      "
+                )
+            );
+            break;
+        }
+    }
+    let used_keys = line_iter
+        .map_while(|line| {
+            if line.is_empty() {
+                None
+            } else {
+                Some(i32::from_str_radix(&line[2..10], 16).unwrap())
+            }
+        })
+        .collect::<std::collections::HashSet<_>>();
+
+    used_keys
+}
+/// Returns a new (unused) key for shared memory.
+pub fn new_key() -> i32 {
+    use rand::Rng;
+
+    static KEY_GUARD: std::sync::Once = std::sync::Once::new();
+    /// Keys returned by this function may be held rather than immediately used to allocate shared
+    /// memory, as such we need to store the keys this function returns so it doesn't return a
+    /// duplicate.
+    static KEYS: Mutex<MaybeUninit<HashSet<i32>>> = Mutex::new(MaybeUninit::uninit());
+
+    KEY_GUARD.call_once(|| {
+        KEYS.lock().unwrap().write(HashSet::new());
+    });
+
+    let mut rng = rand::thread_rng();
+    let used_keys = used_keys()
+        .union(unsafe { KEYS.lock().unwrap().assume_init_ref() })
+        .map(|x| *x)
+        .collect::<HashSet<_>>();
+    let mut key = rng.gen();
+    while used_keys.contains(&key) {
+        key = rng.gen();
+    }
+    key
+}
+
 #[cfg(test)]
 #[allow(clippy::print_stdout)]
 mod tests {
-    use std::sync::atomic::{AtomicI32, Ordering};
-
-    use sequential_test::sequential;
-
     use super::*;
-
-    fn unique_key() -> i32 {
-        const BASE_KEY: i32 = 453_845i32;
-        static BASE: AtomicI32 = AtomicI32::new(BASE_KEY);
-        BASE.fetch_add(1, Ordering::SeqCst)
-    }
-
     const SHARED_MEMORY_SIZE: usize = 1024 * 1024;
 
     // Create link to cargo binary e.g. `sudo ln -s /home/$USER/.cargo/bin/cargo /usr/bin/cargo`
@@ -588,54 +635,64 @@ mod tests {
         });
     }
 
-    // We need to run tests sequentially as they rely on checking the shared memory description
-    // attached to this process. This description would not have a deterministic state if tests
-    // were ran in parallel.
-
     // Tests creating and dropping an allocator with shared memory not previously existing.
     #[test]
-    #[sequential]
     fn new_memory() {
         // Init logger
         init_logger();
 
-        let key = unique_key();
+        let key = new_key();
 
         // Check if shared memory allocated under `key`.
         assert!(!bindings::shared_memory_exists(key).unwrap());
 
         let shared_memory_description_map = SharedAllocator::shared_memory_description_map();
-        assert!(shared_memory_description_map.lock().unwrap().is_empty());
+        assert!(!shared_memory_description_map
+            .lock()
+            .unwrap()
+            .contains_key(&key));
 
         let shared_memory = SharedAllocator::new_memory(key, SHARED_MEMORY_SIZE).unwrap();
 
-        assert_eq!(shared_memory_description_map.lock().unwrap().len(), 1);
+        assert!(shared_memory_description_map
+            .lock()
+            .unwrap()
+            .contains_key(&key));
         assert!(bindings::shared_memory_exists(key).unwrap());
 
         // Deallocates shared memory bound to `shmid`.
         drop(shared_memory);
 
-        assert!(shared_memory_description_map.lock().unwrap().is_empty());
+        assert!(!shared_memory_description_map
+            .lock()
+            .unwrap()
+            .contains_key(&key));
         assert!(!bindings::shared_memory_exists(key).unwrap());
     }
     // Tests creating and dropping an allocator with shared memory previously created by a different
     // process.
     #[test]
-    #[sequential]
     fn new_process() {
         // Init logger
         init_logger();
 
-        let key = unique_key();
-        assert!(!bindings::shared_memory_exists(key).unwrap());
+        let key = new_key();
 
         let shared_memory_description_map = SharedAllocator::shared_memory_description_map();
-        assert!(shared_memory_description_map.lock().unwrap().is_empty());
+
+        assert!(!bindings::shared_memory_exists(key).unwrap());
+        assert!(!shared_memory_description_map
+            .lock()
+            .unwrap()
+            .contains_key(&key));
 
         let shared_memory = SharedAllocator::new_memory(key, SHARED_MEMORY_SIZE).unwrap();
 
-        assert_eq!(shared_memory_description_map.lock().unwrap().len(), 1);
         assert!(bindings::shared_memory_exists(key).unwrap());
+        assert!(shared_memory_description_map
+            .lock()
+            .unwrap()
+            .contains_key(&key));
 
         // Create new process with shared memory allocator point to the same shared memory.
         let output = std::process::Command::new("cargo")
@@ -647,8 +704,11 @@ mod tests {
 
         drop(shared_memory);
 
-        assert!(shared_memory_description_map.lock().unwrap().is_empty());
         assert!(!bindings::shared_memory_exists(key).unwrap());
+        assert!(!shared_memory_description_map
+            .lock()
+            .unwrap()
+            .contains_key(&key));
 
         // Check outputs
         let stdout = std::str::from_utf8(&output.stdout).unwrap();
@@ -658,12 +718,11 @@ mod tests {
     }
 
     #[test]
-    #[sequential]
-    fn base() {
+    fn bindings() {
         // Init logger
         init_logger();
 
-        let key = unique_key();
+        let key = new_key();
 
         assert!(!bindings::shared_memory_exists(key).unwrap());
 
@@ -684,27 +743,40 @@ mod tests {
         assert!(!bindings::shared_memory_exists(key).unwrap());
     }
     #[test]
-    #[sequential]
     fn exists() {
         // Init logger
         init_logger();
 
-        let key = unique_key();
+        let key = new_key();
         dbg!(key);
+
+        let shared_memory_description_map = SharedAllocator::shared_memory_description_map();
 
         // Check if shared memory allocated under `key`.
         assert!(!bindings::shared_memory_exists(key).unwrap());
+        assert!(!shared_memory_description_map
+            .lock()
+            .unwrap()
+            .contains_key(&key));
 
         // Allocates shared memory under `key`.
         let shmid = bindings::allocate_shared_memory(Some(key), SHARED_MEMORY_SIZE).unwrap();
 
         // Check if shared memory allocated under `key`.
         assert!(bindings::shared_memory_exists(key).unwrap());
+        assert!(shared_memory_description_map
+            .lock()
+            .unwrap()
+            .contains_key(&key));
 
         // Deallocates shared memory bound to `shmid`.
         bindings::deallocate_shared_memory(shmid).unwrap();
 
         // Check if shared memory allocated under `key`.
         assert!(!bindings::shared_memory_exists(key).unwrap());
+        assert!(!shared_memory_description_map
+            .lock()
+            .unwrap()
+            .contains_key(&key));
     }
 }

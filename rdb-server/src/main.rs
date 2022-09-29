@@ -40,13 +40,13 @@ use shared_memory_allocator::{
 static EXIT_SIGNAL: AtomicBool = AtomicBool::new(false);
 
 /// Default address used for the TCP socket.
-const DEFAULT_ADDRESS: &str = "127.0.0.1:8080";
+const DEFAULT_ADDRESS: &str = "127.0.0.1:8282";
 /// Default path used for the old process unix socket.
 const DEFAULT_OLD_PROCESS_SOCKET: &str = "/tmp/old_process_socket";
 /// Default path used for the new process unix socket.
 const DEFAULT_NEW_PROCESS_SOCKET: &str = "/tmp/new_process_socket";
 /// Default path used for the file containing the shared memory id.
-const DEFAULT_SHARED_MEMORY_ID: i32 = 456_859i32;
+const DEFAULT_SHARED_MEMORY_KEY: i32 = 0x6F89B;
 
 /// Server command line arguments.
 #[derive(Debug, Parser)]
@@ -65,8 +65,8 @@ struct Args {
     #[clap(short,long,value_parser,default_value_t = log::Level::Trace)]
     log_level: log::Level,
     /// File used to synchronize the shared memory id.
-    #[clap(short, long, value_parser, default_value_t = DEFAULT_SHARED_MEMORY_ID)]
-    shared_memory_id: i32,
+    #[clap(short, long, value_parser, default_value_t = DEFAULT_SHARED_MEMORY_KEY)]
+    shared_memory_key: i32,
 }
 
 /// The data type storing `OldData`.
@@ -474,7 +474,7 @@ fn process(
     let mut handles = Vec::new();
     // Once we receive something (indicating a new process has started) we then transfer data.
     let socket = UnixDatagram::bind(old_process_socket).map_err(ProcessError::SocketBind)?;
-    // Shutdown signal listener
+    // Client stream listener
     let listener = TcpListener::bind(address).map_err(ProcessError::ListenerBind)?;
 
     // Sets streams to non-blocking
@@ -520,6 +520,13 @@ fn process(
             break false;
         }
     };
+
+    // We drop the incoming client stream listener.
+    // Importantly this needs to occur before we send the data offset to the successor process and
+    // it tries to construct a listener on the same socket. If this hadn't been dropped it would
+    // return `Address already in use`.
+    drop(listener);
+
     // We await all threads finishing.
     let now = Instant::now();
     info!("awaiting threads");
@@ -640,6 +647,13 @@ fn main() -> Result<(), MainError> {
     if std::path::Path::new(&args.old_process_socket).exists() {
         info!("non-first");
 
+        // We construct the shared memory allocator before sending the shutdown signal. We must do
+        // it in this order to prevent the shared allocator in the predecessor process being dropped
+        // before the shared allocator in this process is constructed, if this occurs the shared
+        // memory would be deallocated.
+        let allocator = SharedAllocator::new_process(args.shared_memory_key)
+            .map_err(MainError::NewProcessAllocator)?;
+
         // We create the socket on which to send the shutdown notification
         let socket = UnixDatagram::bind(&args.new_process_socket).map_err(MainError::Socket)?;
 
@@ -655,8 +669,6 @@ fn main() -> Result<(), MainError> {
         info!("received offset: {offset}");
 
         // Gets data
-        let allocator = SharedAllocator::new_process(args.shared_memory_id)
-            .map_err(MainError::NewProcessAllocator)?;
         info!("allocator.address(): {}", allocator.address());
         let ptr = <*mut u8>::from_bits(
             allocator
@@ -717,7 +729,7 @@ fn main() -> Result<(), MainError> {
         )?;
     } else {
         info!("first");
-        let allocator = SharedAllocator::new_memory(args.shared_memory_id, GB)
+        let allocator = SharedAllocator::new_memory(args.shared_memory_key, GB)
             .map_err(MainError::NewMemoryAllocator)?;
         let ptr = <*mut u8>::from_bits(allocator.address());
         #[allow(clippy::cast_ptr_alignment)]
@@ -747,18 +759,25 @@ fn main() -> Result<(), MainError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_NEW_PROCESS_SOCKET, DEFAULT_OLD_PROCESS_SOCKET};
-    const CARGO_BIN: &str = "/home/jonathan/.cargo/bin/cargo";
     use std::path::Path;
-    // use sequential_test::sequential;
+    use std::process::Command;
+
+    use super::{DEFAULT_NEW_PROCESS_SOCKET, DEFAULT_OLD_PROCESS_SOCKET};
+
+    fn unique_key() -> i32 {
+        use std::sync::atomic::{AtomicI32, Ordering};
+        const BASE_KEY: i32 = 453_845i32;
+        static BASE: AtomicI32 = AtomicI32::new(BASE_KEY);
+        BASE.fetch_add(1, Ordering::SeqCst)
+    }
 
     #[test]
-    // #[sequential]
     fn interrupt() {
+        let key = unique_key();
         // Start
         #[allow(clippy::unwrap_used)]
-        let child = std::process::Command::new(CARGO_BIN)
-            .arg("run")
+        let child = Command::new("cargo")
+            .args(["run", "--", "-s", &key.to_string()])
             .spawn()
             .unwrap();
 
@@ -776,7 +795,6 @@ mod tests {
         assert!(!Path::new(DEFAULT_OLD_PROCESS_SOCKET).exists());
     }
     #[test]
-    // #[sequential]
     fn server_chain() {
         fn overwrite(s: &str) -> std::io::Result<std::fs::File> {
             std::fs::OpenOptions::new()
@@ -786,36 +804,39 @@ mod tests {
                 .open(s)
         }
 
-        const SERVER_BINARY: &str = "/home/jonathan/Projects/rdb-workspace/target/debug/rdb-server";
-        let max: i32 = 2i32;
+        let key = unique_key();
+        let max: i32 = 10i32;
         assert!(max < i32::MAX);
+
+        assert!(!std::path::Path::new(DEFAULT_NEW_PROCESS_SOCKET).exists());
+        assert!(!std::path::Path::new(DEFAULT_OLD_PROCESS_SOCKET).exists());
 
         #[allow(clippy::unwrap_used)]
         let mut process = (0i32..max).fold(
-            std::process::Command::new("sudo")
-                .args([SERVER_BINARY, "-l", "Info"])
-                .stdout(overwrite("./server_chain_stdout_0.txt").unwrap())
-                .stderr(overwrite("./server_chain_stderr_0.txt").unwrap())
+            Command::new("cargo")
+                .args(["run", "--", "-l", "Trace", "-s", &key.to_string()])
+                .stdout(overwrite("/tmp/server_chain_stdout_0.txt").unwrap())
+                .stderr(overwrite("/tmp/server_chain_stderr_0.txt").unwrap())
                 .spawn()
                 .unwrap(),
             |mut predecessor, i| {
+                // We wait for the predecessor process to have started.
+                std::thread::sleep(std::time::Duration::from_secs(1));
                 // SAFETY:
                 // Since we previously assert `max < i32::MAX` this will always
                 // be safe.
                 let j = unsafe { i.unchecked_add(1) };
-                let successor = std::process::Command::new("sudo")
-                    .args([SERVER_BINARY, "-l", "Info"])
-                    .stdout(overwrite(&format!("./server_chain_stdout_{j}.txt")).unwrap())
-                    .stderr(overwrite(&format!("./server_chain_stderr_{j}.txt")).unwrap())
+                let successor = Command::new("cargo")
+                    .args(["run", "--", "-l", "Trace", "-s", &key.to_string()])
+                    .stdout(overwrite(&format!("/tmp/server_chain_stdout_{j}.txt")).unwrap())
+                    .stderr(overwrite(&format!("/tmp/server_chain_stderr_{j}.txt")).unwrap())
                     .spawn()
                     .unwrap();
 
-                assert!(matches!(predecessor.wait(),Ok(ok) if ok.success()));
+                let res = predecessor.wait();
+                dbg!(&res);
+                assert!(matches!(res, Ok(ok) if ok.success()));
 
-                // let stdout = std::str::from_utf8(&output.stdout).unwrap();
-                // println!("stdout: \"{}\"",stdout);
-                // let stderr = std::str::from_utf8(&output.stderr).unwrap();
-                // println!("stderr: \"{}\"",stderr);
                 successor
             },
         );
@@ -828,11 +849,8 @@ mod tests {
             let pid = i32::try_from(process.id()).unwrap();
             libc::kill(pid, libc::SIGINT);
         }
-        assert!(matches!(process.wait(), Ok(ok) if ok.success()));
-
-        // let stdout = std::str::from_utf8(&output.stdout).unwrap();
-        // println!("stdout: \"{}\"",stdout);
-        // let stderr = std::str::from_utf8(&output.stderr).unwrap();
-        // println!("stderr: \"{}\"",stderr);
+        let res = process.wait();
+        dbg!(&res);
+        assert!(matches!(res, Ok(ok) if ok.success()));
     }
 }

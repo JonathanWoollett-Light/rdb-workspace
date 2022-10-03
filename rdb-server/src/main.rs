@@ -46,7 +46,7 @@ const DEFAULT_OLD_PROCESS_SOCKET: &str = "/tmp/old_process_socket";
 /// Default path used for the new process unix socket.
 const DEFAULT_NEW_PROCESS_SOCKET: &str = "/tmp/new_process_socket";
 /// Default path used for the file containing the shared memory id.
-const DEFAULT_SHARED_MEMORY_KEY: i32 = 0x6F89B;
+const DEFAULT_SHARED_MEMORY_KEY: i32 = 0x0006_F89Bi32;
 
 /// Server command line arguments.
 #[derive(Debug, Parser)]
@@ -758,22 +758,16 @@ fn main() -> Result<(), MainError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::dbg_macro)]
 mod tests {
     use std::path::Path;
     use std::process::Command;
 
     use super::{DEFAULT_NEW_PROCESS_SOCKET, DEFAULT_OLD_PROCESS_SOCKET};
 
-    fn unique_key() -> i32 {
-        use std::sync::atomic::{AtomicI32, Ordering};
-        const BASE_KEY: i32 = 453_845i32;
-        static BASE: AtomicI32 = AtomicI32::new(BASE_KEY);
-        BASE.fetch_add(1, Ordering::SeqCst)
-    }
-
     #[test]
     fn interrupt() {
-        let key = unique_key();
+        let key = shared_memory_allocator::new_key();
         // Start
         #[allow(clippy::unwrap_used)]
         let child = Command::new("cargo")
@@ -804,7 +798,7 @@ mod tests {
                 .open(s)
         }
 
-        let key = unique_key();
+        let key = shared_memory_allocator::new_key();
         let max: i32 = 10i32;
         assert!(max < i32::MAX);
 
@@ -852,5 +846,11 @@ mod tests {
         let res = process.wait();
         dbg!(&res);
         assert!(matches!(res, Ok(ok) if ok.success()));
+
+        // Cleans up
+        for i in 0i32..max {
+            std::fs::remove_file(&format!("/tmp/server_chain_stdout_{i}.txt")).unwrap();
+            std::fs::remove_file(&format!("/tmp/server_chain_stderr_{i}.txt")).unwrap();
+        }
     }
 }

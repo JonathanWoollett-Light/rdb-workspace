@@ -120,10 +120,7 @@ impl Data {
 enum FunctionMapError {
     /// Failed to deserialize inputs.
     #[error("Failed to deserialize input: {0}")]
-    #[cfg(feature = "bincode")]
     Deserialize(#[from] bincode::Error),
-    #[cfg(feature = "json")]
-    Deserialize(#[from] serde_json::Error),
 
     /// Failed to acquire write lock on database data.
     #[error("Failed to acquire write lock on database data.")]
@@ -157,10 +154,7 @@ fn function_map(
     #[allow(clippy::let_unit_value, clippy::map_err_ignore)]
     match function_index {
         0 => {
-            #[cfg(feature = "bincode")]
             let input = bincode::deserialize(serialized_input)?;
-            #[cfg(feature = "json")]
-            let input = serde_json::from_slice(serialized_input)?;
 
             let output = store
                 .read()
@@ -169,10 +163,7 @@ fn function_map(
             write_frame(stream, output)?;
         }
         1 => {
-            #[cfg(feature = "bincode")]
             let input = bincode::deserialize(serialized_input)?;
-            #[cfg(feature = "json")]
-            let input = serde_json::from_slice(serialized_input)?;
 
             trace!("input: {:?}", input);
 
@@ -183,10 +174,7 @@ fn function_map(
             write_frame(stream, output)?;
         }
         2 => {
-            #[cfg(feature = "bincode")]
             let input = bincode::deserialize(serialized_input)?;
-            #[cfg(feature = "json")]
-            let input = serde_json::from_slice(serialized_input)?;
 
             trace!("input: {:?}", input);
             let output = store
@@ -205,10 +193,7 @@ fn function_map(
 enum WriteFrameError {
     /// Failed to serialize inputs.
     #[error("Failed to serialize input: {0}")]
-    #[cfg(feature = "bincode")]
     Serialize(#[from] bincode::Error),
-    #[cfg(feature = "json")]
-    Serialize(#[from] serde_json::Error),
     /// Failed to write all data to the stream.
     #[error("Failed to write all data to the stream.")]
     Write(std::io::Error),
@@ -217,10 +202,7 @@ enum WriteFrameError {
 /// Writes frame to stream
 #[logfn(Trace)]
 fn write_frame(stream: &mut TcpStream, input: impl Serialize) -> Result<(), WriteFrameError> {
-    #[cfg(feature = "bincode")]
     let serialized = bincode::serialize(&input)?;
-    #[cfg(feature = "json")]
-    let serialized = serde_json::to_vec(&input)?;
 
     // SAFETY:
     // For `size_of::<usize>().checked_add(serialized.len()).is_err()` to be

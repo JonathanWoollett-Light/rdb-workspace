@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <title>HTML 5 Boilerplate</title>
+    
+    <!-- CSS only -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.2/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-Zenh87qX5JnK2Jl0vWa8Ck2rdkQ2Bzep5IDxbcnCeuOxjzrPF/et3URy9Bv1WTRi" crossorigin="anonymous">
+
+    <!-- Font -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Mono:wght@300;400;500&family=Roboto+Mono:wght@500&display=swap" rel="stylesheet"> 
+
+    <style>
+        .outer-box {
+            background-color: #f9f9f9;
+            border-radius: 10px;
+            padding: 30px;
+            font-family: 'Noto Sans Mono', monospace;
+            /* font-family: 'Roboto Mono', monospace; */
+        }
+        .box {
+            background-color: #f1f1f1;
+            border-radius: 10px;
+            padding: 15px;
+            margin: 10px 0px 10px 20px;
+        }
+        .field {
+            background-color: #ddd;
+            border-radius: 3px;
+            padding: 0px 4px;
+            border-width: 0px;
+            width: 140px;
+        }
+        textarea {
+            margin-left: 30px;
+        }
+        .tab {
+            display: inline-block;
+            width: 30px;
+        }
+        .member {
+            padding: 5px 0px;
+        }
+        .boierplate-text {
+            color: #5c5c5c;
+        }
+        .code-area {
+            margin: 10px 0px;
+        }
+        .code {
+            background-color: #ddd;
+            border-radius: 3px;
+            padding: 0px 4px;
+            border-width: 0px;
+        }
+        .from-code {
+            padding: 10px 0px;
+        }
+        #actions {
+            padding: 20px;
+        }
+    </style>
+  </head>
+  <body>
+    <datalist id="types">
+        <option value="u8"></option>
+        <option value="u16"></option>
+        <option value="u32"></option>
+        <option value="u64"></option>
+        <option value="u128"></option>
+        <option value="i8"></option>
+        <option value="i16"></option>
+        <option value="i32"></option>
+        <option value="i64"></option>
+        <option value="i128"></option>
+        <option value="f32"></option>
+        <option value="f64"></option>
+        <option value="String"></option>
+    </datalist>
+    <div class="container">
+        <h1>Generator</h1>
+        <hr/>
+        <div class="d-flex align-items-start">
+            <div class="nav flex-column nav-pills me-3" id="v-pills-tab" role="tablist" aria-orientation="vertical">
+                <button class="nav-link active" id="v1-tab" data-bs-toggle="pill" data-bs-target="#v1" type="button" role="tab">placeholder</button>
+                <button class="nav-link" id="v2-tab" data-bs-toggle="pill" data-bs-target="#v2" type="button" role="tab">placeholder</button>
+            </div>
+            <div class="tab-content" id="v-pills-tabContent">
+                <div class="tab-pane fade show active" id="v1" role="tabpanel">
+                    <div class="outer-box">
+                        <div>
+                            <span class="boierplate-text">struct </span>
+                            <input oninput="updateStruct(event)" class="field struct-name" type="text" placeholder="struct identifier">
+                            <span class="boierplate-text"> {</span>
+                        </div>
+                        <div class="member">
+                            <span class="tab"></span>
+                            <span class="boierplate-text">pub </span>
+                            <input class="field ident" type="text" placeholder="identifier">
+                            <span class="boierplate-text">: </span>
+                            <input class="field type" type="text" placeholder="type" list="types">
+                            <span class="boierplate-text">,</span>
+                        </div>
+                        <div class="member">
+                            <span class="tab"></span>
+                            <span class="boierplate-text">pub </span>
+                            <input class="field ident" type="text" placeholder="identifier">
+                            <span class="boierplate-text">: </span>
+                            <input class="field type" type="text" placeholder="type" list="types">
+                            <span class="boierplate-text">,</span>
+                        </div>
+                        <div class="member">
+                            <span class="tab"></span>
+                            <span class="boierplate-text">pub</span>
+                            <input class="field ident" type="text" placeholder="identifier">
+                            <span class="boierplate-text">:</span>
+                            <input class="field type" type="text" placeholder="type" list="types">
+                            <span class="boierplate-text">,</span>
+                        </div>
+                        <div class="boierplate-text">}</div>
+                        <div>
+                            <span class="boierplate-text">impl </span>
+                            <input oninput="updateStruct(event)" class="field struct-name" type="text" placeholder="struct identifier">
+                            <span class="boierplate-text"> {</span>
+                        </div>
+                        <div class="box function">
+                            <span class="boierplate-text">pub fn</span>
+                            <input class="field ident" type="text" placeholder="identifier">
+                            <span class="boierplate-text">(</span>
+                            <input class="field param-ident" type="text" placeholder="identifier">
+                            <span class="boierplate-text">:</span>
+                            <input class="field param-type" type="text" placeholder="type" list="types">
+                            <span class="boierplate-text">) -> </span>
+                            <input class="field type" type="text" placeholder="type" list="types">
+                            <span class="boierplate-text">{</span>
+                            <div class="code-area">
+                                <textarea cols="80" oninput="change(event)" placeholder="Your function code here..." class="code" style="resize:none;"></textarea>
+                            </div>
+                            <div class="boierplate-text">}</div>
+                        </div>
+                        <div class="box function">
+                            <span class="boierplate-text">pub fn</span>
+                            <input class="field ident" type="text" placeholder="identifier">
+                            <span class="boierplate-text">(</span>
+                            <input class="field param-ident" type="text" placeholder="identifier">
+                            <span class="boierplate-text">:</span>
+                            <input class="field param-type" type="text" placeholder="type" list="types">
+                            <span class="boierplate-text">) -> </span>
+                            <input class="field type" type="text" placeholder="type" list="types">
+                            <span class="boierplate-text">{</span>
+                            <div class="code-area">
+                                <textarea cols="80" oninput="change(event)" placeholder="Your function code here..." class="code" style="resize:none;"></textarea>
+                            </div>
+                            <div class="boierplate-text">}</div>
+                        </div>
+                        <div class="box function">
+                            <span class="boierplate-text">pub fn</span>
+                            <input class="field ident" type="text" placeholder="identifier">
+                            <span class="boierplate-text">(</span>
+                            <input class="field param-ident" type="text" placeholder="identifier">
+                            <span class="boierplate-text">:</span>
+                            <input class="field param-type" type="text" placeholder="type" list="types">
+                            <span class="boierplate-text">) -> </span>
+                            <input class="field type" type="text" placeholder="type" list="types">
+                            <span class="boierplate-text">{</span>
+                            <div class="code-area">
+                                <textarea cols="80" oninput="change(event)" placeholder="Your function code here..." class="code" style="resize:none;"></textarea>
+                            </div>
+                            <div class="boierplate-text">}</div>
+                        </div>
+                        <div class="boierplate-text">}</div>
+                    </div>
+                    <div id="actions">
+                        <button type="button" class="btn btn-primary" onclick="build(event)">Build</button>
+                        <button type="button" class="btn btn-primary">Test</button>
+                        <button type="button" class="btn btn-primary">Publish</button>
+                    </div>
+                </div>
+                <div class="tab-pane fade" id="v2" role="tabpanel">
+                    <div class="outer-box">
+                        <div>
+                            <span class="boierplate-text">struct </span>
+                            <input oninput="updateStruct(event)" class="field struct-name" type="text" placeholder="struct identifier">
+                            <span class="boierplate-text"> {</span>
+                        </div>
+                        <div class="member">
+                            <span class="tab"></span>
+                            <span class="boierplate-text">pub </span>
+                            <input class="field" type="text" placeholder="identifier">
+                            <span class="boierplate-text">: </span>
+                            <input class="field" type="text" placeholder="type" list="types">
+                            <span class="boierplate-text">,</span>
+                        </div>
+                        <div class="member">
+                            <span class="tab"></span>
+                            <span class="boierplate-text">pub </span>
+                            <input class="field" type="text" placeholder="identifier">
+                            <span class="boierplate-text">: </span>
+                            <input class="field" type="text" placeholder="type" list="types">
+                            <span class="boierplate-text">,</span>
+                        </div>
+                        <div class="member">
+                            <span class="tab"></span>
+                            <span class="boierplate-text">pub</span>
+                            <input class="field" type="text" placeholder="identifier">
+                            <span class="boierplate-text">:</span>
+                            <input class="field" type="text" placeholder="type" list="types">
+                            <span class="boierplate-text">,</span>
+                        </div>
+                        <div class="boierplate-text">}</div>
+                        <div>
+                            <span class="boierplate-text">impl From&lt;</span>
+                            ...
+                            <span class="boierplate-text">&gt; for </span>
+                            <input oninput="updateStruct(event)" class="field struct-name" type="text" placeholder="struct identifier">
+                            <span class="boierplate-text">{</span>
+                        </div>
+                        <div class="from-code">
+                            <div>
+                                <span class="tab">
+                                </span><span class="boierplate-text">fn from(</span>
+                                <input class="field" type="text" placeholder="identifier">
+                                <span class="boierplate-text">:</span>
+                                ...
+                                <span class="boierplate-text">) -> Self {</span>
+                            </div>
+                            <div><span class="tab"></span><span class="boierplate-text">}</span></div>
+                        </div>
+                        <div class="boierplate-text">}</div>
+                        <div>
+                            <span class="boierplate-text">impl </span>
+                            <input oninput="updateStruct(event)" class="field struct-name" type="text" placeholder="struct identifier">
+                            <span class="boierplate-text"> {</span>
+                        </div>
+                        <div class="box">
+                            <span class="boierplate-text">pub fn</span>
+                            <input class="field" type="text" placeholder="identifier">
+                            <span class="boierplate-text">(</span>
+                            <input class="field" type="text" placeholder="identifier">
+                            <span class="boierplate-text">:</span>
+                            <input class="field" type="text" placeholder="type" list="types">
+                            <span class="boierplate-text">) -> </span>
+                            <input class="field" type="text" placeholder="type" list="types">
+                            <span class="boierplate-text">{</span>
+                            <div class="code-area">
+                                <span class="tab"></span>
+                                <textarea cols="80" oninput="change(event)" placeholder="Your function code here..." class="code" style="resize:none;"></textarea>
+                            </div>
+                            <div class="boierplate-text">}</div>
+                        </div>
+                        <div class="box">
+                            <span class="boierplate-text">pub fn</span>
+                            <input class="field" type="text" placeholder="identifier">
+                            <span class="boierplate-text">(</span>
+                            <input class="field" type="text" placeholder="identifier">
+                            <span class="boierplate-text">:</span>
+                            <input class="field" type="text" placeholder="type" list="types">
+                            <span class="boierplate-text">) -> </span>
+                            <input class="field" type="text" placeholder="type" list="types">
+                            <span class="boierplate-text">{</span>
+                            <div class="code-area">
+                                <span class="tab"></span>
+                                <textarea cols="80" oninput="change(event)" placeholder="Your function code here..." class="code" style="resize:none;"></textarea>
+                            </div>
+                            <div class="boierplate-text">}</div>
+                        </div>
+                        <div class="box">
+                            <span class="boierplate-text">pub fn</span>
+                            <input class="field" type="text" placeholder="identifier">
+                            <span class="boierplate-text">(</span>
+                            <input class="field" type="text" placeholder="identifier">
+                            <span class="boierplate-text">:</span>
+                            <input class="field" type="text" placeholder="type" list="types">
+                            <span class="boierplate-text">) -> </span>
+                            <input class="field" type="text" placeholder="type" list="types">
+                            <span class="boierplate-text">{</span>
+                            <div class="code-area">
+                                <span class="tab"></span>
+                                <textarea cols="80" oninput="change(event)" placeholder="Your function code here..." class="code" style="resize:none;"></textarea>
+                            </div>
+                            <div class="boierplate-text">}</div>
+                        </div>
+                        <div class="boierplate-text">}</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- JavaScript Bundle with Popper -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.2.2/dist/js/bootstrap.bundle.min.js" integrity="sha384-OERcA2EqjJCMA+/3y+gxIOqMEjwtxJY7qPCqsdltbNJuaOe923+mo//f6V8Qbsw3" crossorigin="anonymous"></script>
+    <script>
+        // Updates code text areas to auto growth vertically.
+        function change(event) {
+            let target = event.target;
+            target.style.height = 0;
+            target.style.height = target.scrollHeight + "px";
+        }
+        // Updates both struct name inputs to match.
+        function updateStruct(event) {
+            let target = event.target;
+            let name = target.value;
+            let box = target.closest(".outer-box");
+            box.querySelectorAll(".struct-name").forEach(element => {
+                element.value = name;
+            });
+            let panel = target.closest(".tab-pane");
+            console.log("id:",panel.id);
+            let tab = document.querySelector(`button[data-bs-target="#${ panel.id }"]`);
+            tab.innerHTML = name;
+        }
+        // Builds
+        function build(event) {
+            let target = event.target;
+            let panel = target.closest(".tab-pane");
+            let struct_name = panel.querySelector(".struct-name").value;
+            console.log("struct_name:",struct_name);
+
+            let members = [...panel.querySelectorAll(".member")].map(x => {
+                let member = {
+                    ident: x.querySelector(".ident").value,
+                    type: x.querySelector(".type").value
+                };
+                
+                return member;
+            });
+            console.log("members:", members);
+
+            let functions = [...panel.querySelectorAll(".function")].map(x=> {
+                let fn = {
+                    ident: x.querySelector(".ident").value,
+                    type: x.querySelector(".type").value,
+                    param_ident: x.querySelector(".param-ident").value,
+                    param_type: x.querySelector(".param-type").value,
+                    code: x.querySelector(".code").value
+                };
+                return fn;
+            });
+            console.log("functions:",functions);
+
+            let data = {
+                name: name,
+                members: members,
+                functions: functions,
+            };
+        }
+    </script>
+  </body>
+</html>

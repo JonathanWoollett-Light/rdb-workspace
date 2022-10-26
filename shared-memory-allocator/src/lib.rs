@@ -575,7 +575,7 @@ pub fn used_keys() -> HashSet<i32> {
             assert_eq!(
                 line_iter.next(),
                 Some(
-                    "key        shmid      owner      perms      bytes      nattch     status     "
+                    "key        shmid      owner      perms      bytes      nattch     status      "
                 )
             );
             break;

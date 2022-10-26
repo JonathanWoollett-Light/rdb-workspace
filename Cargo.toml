@@ -1,4 +1,4 @@
 [workspace]
 members = [
-    "shared-memory-allocator","rdb-server","rdb-client"
+    "shared-memory-allocator","rdb","server"
 ]

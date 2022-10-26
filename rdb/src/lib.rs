@@ -49,10 +49,7 @@ pub enum CommunicationErr {
     Read(#[from] ReadFrameError),
     /// Failed to deserialize results.
     #[error("Failed to deserialize results: {0}")]
-    #[cfg(feature = "bincode")]
     Deserialize(#[from] bincode::Error),
-    #[cfg(feature = "json")]
-    Deserialize(#[from] serde_json::Error),
     /// Failed to connect to server `TcpStream`.
     #[error("Failed to connect to server `TcpStream`.")]
     Connect(#[from] std::io::Error),
@@ -93,7 +90,7 @@ impl Client {
     /// User `get` query.
     // Handling this would add generation complexity, without any performance benefit.
     #[allow(clippy::unit_arg)]
-    #[logfn(ok = "TRACE", err = "ERROR")]
+    #[logfn(Trace)]
     pub fn get(&mut self, input: ()) -> CommunicationResult<GetReturn> {
         // Handling this would add generation complexity, without any performance benefit.
         #[allow(clippy::clone_on_copy)]
@@ -108,7 +105,7 @@ impl Client {
     /// User `set` query.
     // Handling this would add generation complexity, without any performance benefit.
     #[allow(clippy::unit_arg)]
-    #[logfn(ok = "TRACE", err = "ERROR")]
+    #[logfn(Trace)]
     pub fn set(&mut self, input: u16) -> CommunicationResult<SetReturn> {
         // Handling this would add generation complexity, without any performance benefit.
         #[allow(clippy::clone_on_copy)]
@@ -123,7 +120,7 @@ impl Client {
     /// User `sum` query.
     // Handling this would add generation complexity, without any performance benefit.
     #[allow(clippy::unit_arg)]
-    #[logfn(ok = "TRACE", err = "ERROR")]
+    #[logfn(Trace)]
     pub fn sum(&mut self, input: Vec<u16>) -> CommunicationResult<SumReturn> {
         // Handling this would add generation complexity, without any performance benefit.
         #[allow(clippy::clone_on_copy)]
@@ -135,45 +132,36 @@ impl Client {
         })
     }
 
-    #[logfn(ok = "TRACE", err = "ERROR")]
+    #[logfn(Trace)]
     pub fn raw_get(&mut self, input: ()) -> CommunicationResult<GetReturn> {
         // Write
         write_frame(&mut self.0, 0, input)?;
         // Read
         let serialized = read_frame(&mut self.0)?;
         // Deserialize
-        #[cfg(feature = "bincode")]
         let deserialized = bincode::deserialize(&serialized)?;
-        #[cfg(feature = "json")]
-        let deserialized = serde_json::from_slice(&serialized)?;
         Ok(deserialized)
     }
 
-    #[logfn(ok = "TRACE", err = "ERROR")]
+    #[logfn(Trace)]
     pub fn raw_set(&mut self, input: u16) -> CommunicationResult<SetReturn> {
         // Write
         write_frame(&mut self.0, 1, input)?;
         // Read
         let serialized = read_frame(&mut self.0)?;
         // Deserialize
-        #[cfg(feature = "bincode")]
         let deserialized = bincode::deserialize(&serialized)?;
-        #[cfg(feature = "json")]
-        let deserialized = serde_json::from_slice(&serialized)?;
         Ok(deserialized)
     }
 
-    #[logfn(ok = "TRACE", err = "ERROR")]
+    #[logfn(Trace)]
     pub fn raw_sum(&mut self, input: Vec<u16>) -> CommunicationResult<SumReturn> {
         // Write
         write_frame(&mut self.0, 2, input)?;
         // Read
         let serialized = read_frame(&mut self.0)?;
         // Deserialize
-        #[cfg(feature = "bincode")]
         let deserialized = bincode::deserialize(&serialized)?;
-        #[cfg(feature = "json")]
-        let deserialized = serde_json::from_slice(&serialized)?;
         Ok(deserialized)
     }
 }
@@ -267,10 +255,7 @@ fn read_frame(stream: &mut TcpStream) -> Result<Vec<u8>, ReadFrameError> {
 pub enum WriteFrameError {
     /// Failed to serialize inputs.
     #[error("Failed to serialize input: {0}")]
-    #[cfg(feature = "bincode")]
     Serialize(#[from] bincode::Error),
-    #[cfg(feature = "json")]
-    Serialize(#[from] serde_json::Error),
     /// Failed to write all data to the stream.
     #[error("Failed to write all data to the stream.")]
     Write(std::io::Error),
@@ -283,10 +268,7 @@ fn write_frame(
     function_index: usize,
     input: impl Serialize,
 ) -> Result<(), WriteFrameError> {
-    #[cfg(feature = "bincode")]
     let serialized = bincode::serialize(&input)?;
-    #[cfg(feature = "json")]
-    let serialized = serde_json::to_vec(&input)?;
 
     trace!("serialized: {:?}", &serialized);
 
@@ -306,8 +288,8 @@ fn write_frame(
         .map_err(WriteFrameError::Write)
 }
 
-#[allow(clippy::unwrap_used, clippy::dbg_macro, clippy::unreachable)]
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::dbg_macro, clippy::unreachable)]
 mod tests {
     use std::time::Instant;
 
